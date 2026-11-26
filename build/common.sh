@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
 base_ref() { head -n 1 manifests/base.txt; }
 

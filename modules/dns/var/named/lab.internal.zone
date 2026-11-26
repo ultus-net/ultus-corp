@@ -1,0 +1,9 @@
+$TTL 3600
+@   IN  SOA dns-a.lab.internal. hostmaster.lab.internal. (
+        2026112601 ; serial
+        3600       ; refresh
+        600        ; retry
+        604800     ; expire
+        300 )      ; minimum
+@       IN  NS  dns-a.lab.internal.
+dns-a   IN  A   127.0.0.2
