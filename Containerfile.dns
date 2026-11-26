@@ -1,0 +1,8 @@
+ARG BASE
+FROM ${BASE}
+
+RUN --mount=type=bind,source=build/out/install-dns.txt,target=/tmp/install-list.txt \
+    dnf -y install $(cat /tmp/install-list.txt) && dnf clean all
+
+COPY modules/base/ /
+RUN /usr/libexec/ultus-corp/build.d/00-base.sh

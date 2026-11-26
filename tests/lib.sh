@@ -1,5 +1,8 @@
 FAILURES=0
-EVIDENCE=${EVIDENCE:-run/evidence/static.log}
+_name=${0##*/}
+_name=${_name%.sh}
+_name=${_name#test-}
+EVIDENCE=${EVIDENCE:-run/evidence/$_name.log}
 mkdir -p "$(dirname "$EVIDENCE")"
 : > "$EVIDENCE"
 . build/checks.sh
@@ -45,6 +48,6 @@ assert_eq() {
 
 finish() {
   if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failing"; exit 1; fi
-  echo "static gate passed"
+  echo "$_name gate passed"
   echo "evidence: $EVIDENCE"
 }
