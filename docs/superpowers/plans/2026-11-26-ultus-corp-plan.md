@@ -14,6 +14,7 @@
 
 - Base image: `quay.io/centos-bootc/centos-bootc:stream10@sha256:0df2ed8fd881b36b34f559c59eb5c4a51992f69b1ce05203307ce29ed1a76f87`, tag and digest both present.
 - Guests are CentOS Stream 10 only. No Fedora, Ubuntu or Debian guest.
+- P0 builds the primary DC hub and the branches. The DR DC is evolution stage 3 in the design and is not a P0 scenario.
 - One scenario resident at a time. A single scenario stays below five VMs and at most 10 GiB RAM.
 - `lab down` leaves no domain, network, volume or generated key, and a second `lab up` succeeds.
 - No libvirt network may forward to the host LAN. Every rendered network is `<forward mode='isolated'/>`, with no DHCP and no libvirt DNS.
@@ -222,6 +223,7 @@ git commit -m "feat: repo skeleton, evidence recorder and static gate"
 - Create: `manifests/base.txt`, `manifests/packages-common.txt`
 - Create: `build/common.sh`, `build/manifest.sh`, `build/package-lock.sh`
 - Create: `Containerfile.dns`
+- Create: `modules/base/usr/libexec/ultus-corp/build.d/00-base.sh`
 - Create: `tests/test-image.sh`
 
 **Interfaces:**
@@ -294,6 +296,12 @@ joined manifest, installs from the lock when one exists and otherwise resolves,
 cleans the dnf cache, copies `modules/` onto `/`, and runs
 `/usr/libexec/ultus-corp/build.d/` in name order. The lint runs from the build
 script so it runs on a cached build.
+
+`modules/` must exist before the first build, or the `COPY` fails. Task 2
+therefore creates `modules/base/usr/libexec/ultus-corp/build.d/00-base.sh`,
+which asserts the base contract the other modules rely on: `bootc` and
+`greenboot` are installed and the bootc unit is present. Task 3 adds
+`modules/dns/` beside it; both trees merge onto `/`.
 
 `build/package-lock.sh resolve <role>` builds the image, then writes
 `podman run --rm "$(lab_image "$role")" rpm -qa --qf '%{NAME}-%{EVR}.%{ARCH}\n' | sort`

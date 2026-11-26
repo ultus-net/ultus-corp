@@ -1,8 +1,9 @@
 # ultus-corp: a reference corporate network lab
 
 **Status:** draft for approval, 2026-11-26
-**Scope:** a three-branch company with a data-centre hub, built from CentOS
-Stream 10 bootc images and run as libvirt VMs. It starts with stateless
+**Scope:** a three-branch company with a primary data centre, a
+disaster-recovery data centre and a hub, built from CentOS Stream 10 bootc
+images and run as libvirt VMs. It starts with stateless
 services, then adds the directory, the IdP, endpoint management and the stateful
 roles a corporate network actually needs. Every component is designed and tested
 as its own bounded scenario, and the full topology is never resident.
@@ -37,11 +38,14 @@ document.
 - The lab is judged on whether it teaches the mechanism, not on whether it
   runs. A green test that hides why it passed is a failure here.
 
-The shape is a central control plane and a local data plane. The data centre
-owns identity, policy, configuration, endpoint management and the artifact
-registry. Each branch runs its own DNS, DHCP, NTP and proxy so the LAN survives
-a WAN loss. A WireGuard overlay is only the transport between them, and a new
-branch is one spec entry and one address block, never a code change.
+The shape is a central control plane and a local data plane. The primary data
+centre owns identity, policy, configuration, endpoint management and the
+artifact registry. Each branch runs its own DNS, DHCP, NTP and proxy so the LAN
+survives a WAN loss. The DR data centre runs the same role images as a standby
+hub, so losing the primary data centre costs the branches their central services
+but not their local ones. A WireGuard overlay is only the transport between
+them, and a new branch is one spec entry and one address block, never a code
+change.
 
 The design is complete. The lab is not. Every component below is also a
 scenario: a bounded set of VMs, a spec entry, a test and a measured footprint.
@@ -57,8 +61,9 @@ assembly checks with a dated evidence file, not the normal mode.
   isolation, with its footprint measured and recorded.
 - Components that carry to a real rebuild: image, config template and test
   travel; the trust root, names and keys are reissued.
-- Three branches plus a data-centre hub, connected hub-and-spoke, that exercises
-  DHCP relay, split-horizon DNS, cross-branch routing and an active/active pair.
+- Three branches plus a primary and a DR data centre, connected hub-and-spoke,
+  that exercises DHCP relay, split-horizon DNS, cross-branch routing and an
+  active/active pair.
 - A branch that keeps resolving, leasing and telling time when its overlay link
   is cut.
 - A real identity stack: FreeIPA as the source of truth, Keycloak federated to
@@ -168,6 +173,9 @@ Rules that make the model hold:
 | assembly-branches | 13 | 16 GiB | add-a-branch and branch survival, across two branches |
 | full | 26 | 30 GiB | the whole diagram, documented and never run on this host |
 
+The DR DC is drawn as evolution stage 3 and is excluded from `full`, which
+counts the primary data centre and the three branches only.
+
 Peak for any single scenario is 10 GiB. The host has about 18 GiB free with the
 desktop running, so every scenario fits as normal work. Both assembly runs need
 the desktop stopped. The full three-branch diagram needs the whole host and
@@ -227,7 +235,7 @@ library, so the renderer needs no dependency at all.
 | --- | --- | --- | --- | --- |
 | D1 | Base | CentOS Stream 10 image mode, bootc, Podman Quadlet | EL parity, roughly five-year support, atomic upgrade and rollback | Fedora, which moves every six months; Ubuntu and Debian, which have no atomic rollback |
 | D2 | Repository | Fresh tree, one `Containerfile.<role>` per role | The role pattern is proven in `dux-atomic`; the Fedora pin and desktop half are not | Forking `dux-atomic` |
-| D3 | Topology | Three branches plus a DC hub, hub-and-spoke WireGuard | The smallest shape that shows central control with local survival | Two sites, which cannot show a flexible branch count; full mesh now |
+| D3 | Topology | Three branches, a primary DC hub and a DR DC, hub-and-spoke WireGuard | Mirrors the estate the operator has run: a data centre with DR and branches hanging off it, and it is the smallest shape that shows central control with local survival | Two sites, which cannot show a flexible branch count; full mesh now |
 | D4 | Platform | libvirt/KVM, TOML spec, `lab` renderer | Deterministic, cheap to rebuild, and parseable with the Python standard library | OpenTofu/libvirt first; Proxmox; a YAML spec with a parser dependency |
 | D5 | Isolation | Dedicated libvirt networks, no forward to the host LAN, own address plan | Safe to publish and safe to break | Bridging to the home LAN; tailnet reachability |
 | D6 | Identity | FreeIPA source of truth; Keycloak federates over LDAP; FreeRADIUS uses FreeIPA certs | One authority, AD plus Entra shape | Two stores; directory only |
@@ -240,7 +248,7 @@ library, so the renderer needs no dependency at all.
 | D13 | Supply chain | cosign keyless per image, SBOM per image, trivy gate | Same gates as `dux-atomic` | Unsigned local builds |
 | D14 | Lab unit | One scenario per component, run and torn down alone | The design is complete while the resident footprint is one bounded component, so it fits hardware on hand and costs nothing | A resident topology; graduated `--profile` sets |
 | D15 | Licence and visibility | Public, MIT, generic | A reference design should be readable | Private; AGPL |
-| D16 | Overlay growth | BGP over the tunnels is the first scaling step, then direct paths, then a second hub | FRR already ships in the edge image, so growth is config, not a redesign | Hand-editing a full mesh |
+| D16 | Overlay growth | BGP over the tunnels is the first scaling step, then direct paths, then the DR hub | FRR already ships in the edge image, so growth is config, not a redesign | Hand-editing a full mesh |
 | D17 | Endpoint management | Fleet for inventory and policy, PXE for Linux and WinPE, macOS by profile | One plane for a mixed fleet, and onboarding from blank | Intune, which needs Entra; client VMs only, which leaves onboarding manual |
 | D18 | 802.1X authenticator | `hostapd` with the wired driver on the users bridge | Gives real supplicants a real authenticator, not just `eapol_test` | `eapol_test` only, which proves the server and nothing else |
 | D19 | Integration evidence | A static interface-composition check plus a dated assembly run | Composition is checked continuously where it can be, and sampled where it cannot | Assuming a green scenario proves the network |
@@ -262,6 +270,9 @@ flowchart TB
     MON[monitoring]
     AUX["git, secrets<br/>Fleet, PXE"]
   end
+  subgraph dr["DR DC, 10.101.0.0/16, stage 3"]
+    DRH[hub-dr]
+  end
   subgraph b1["Branch 1, 10.11.0.0/16"]
     E1[edge-1]
     L1["DNS, DHCP, NTP, proxy"]
@@ -278,6 +289,7 @@ flowchart TB
   E1 == overlay ==> HUB
   E2 == overlay ==> HUB
   E3 == overlay ==> HUB
+  HUB -. standby hub .-> DRH
   HUB --- ID
   HUB --- REG
   HUB --- MON
@@ -290,12 +302,13 @@ flowchart TB
 | Site | Prefix | Segments |
 | --- | --- | --- |
 | DC | 10.100.0.0/16 | mgmt .10, srv .20, dmz .30 |
+| DR DC | 10.101.0.0/16 | mgmt .10, srv .20, dmz .30 |
 | Branch 1 | 10.11.0.0/16 | mgmt .10, usr .20, prt .30, guest .40, srv .50 |
 | Branch 2 | 10.12.0.0/16 | mgmt .10, usr .20, prt .30, guest .40, srv .50 |
 | Branch 3 | 10.13.0.0/16 | mgmt .10, usr .20, prt .30, guest .40, srv .50 |
 
-- Overlay: `10.255.0.0/16`. Hub `.0.1`, branch *n* `.n.1`.
-- AS 65000 at the hub, 65001 to 65003 at the branches.
+- Overlay: `10.255.0.0/16`. Hub `.0.1`, DR hub `.0.2`, branch *n* `.n.1`.
+- AS 65000 at the hub, 65010 at the DR hub, 65001 to 65003 at the branches.
 - Realm `LAB.INTERNAL`. Zone `lab.internal`, delegated `ipa.lab.internal`.
 - Hostnames carry the site: `dns-br1.lab.internal`, `hub-dc.lab.internal`.
 - The overlay space is separate from every site prefix, so a leaked route is
@@ -316,6 +329,10 @@ flowchart TB
 | Registry mirror | yes | pull only | the hub is the only egress |
 | Monitoring, git, secrets | yes | agent only | central |
 | Print, file, IPAM | yes | no | central, and stateful |
+
+The DR DC runs the DC column from the same role images, in standby. It is not a
+second code path: the only difference is which hub on the overlay is active,
+and that is spec and key state, not an image. Evolution stage 3 makes it live.
 
 ## Endpoint coverage
 
@@ -413,7 +430,7 @@ tunnels is the first move that scales.
 | 0 | Hub-and-spoke, static WireGuard `AllowedIPs` | now | one peer per branch on the hub |
 | 1 | BGP over the tunnels, hub as route reflector | a second branch, or any change that touches every node | edge config only |
 | 2 | Direct spoke-to-spoke for selected pairs | a branch-to-branch workload that cannot take the hairpin | one extra peer and a more specific route |
-| 3 | A second hub, BGP multipath | hub downtime becomes unacceptable | two hub profiles, every branch peers with both |
+| 3 | The DR DC becomes a live hub, BGP multipath | DR is a stated requirement, so a hub loss must not take the branches offline | two hub profiles, every branch peers with both |
 | 4 | Local internet breakout at large branches | SaaS latency or DC egress cost | policy routing per prefix, the hub stops being the only egress |
 | 5 | A control plane for keys and routes (Headscale, NetBird) | more branches than hand-managed keys carry, or short-lived keys required | overlay identity tied to FreeIPA |
 
