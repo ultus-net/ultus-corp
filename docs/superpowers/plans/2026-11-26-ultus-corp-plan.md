@@ -25,6 +25,36 @@
 - Repo is public, MIT, generic. No client name and no real address.
 - Commit subjects use `feat:`/`fix:`/`chore:`/`docs:`/`test:` and one logical change per commit.
 
+## Platform evidence
+
+Facts this plan depends on, read 2026-11-26. The design's table is the full
+record. A failing fact here is a plan bug.
+
+| Fact | Value |
+| --- | --- |
+| Base image | `centos-bootc:stream10` multi-arch, digest `0df2ed8f…` |
+| Kea | `3.0.3-1.el10`, BaseOS |
+| greenboot | `0.16.5-0.el10`, AppStream |
+| hostapd | `2.11-2.el10`, AppStream |
+| ipa-server-dns | `4.13.4-1.el10`, AppStream |
+| Image to disk | `image-builder build --bootc-ref … qcow2` |
+| Host, measured | 12 threads, 30 GiB RAM, 56 GiB free, python3.14 |
+| Host, missing | `virsh`, `xorriso`, `genisoimage`, `dig` |
+
+## Prerequisites the operator installs once
+
+The host tools are not repo artifacts. Install them before Task 6:
+
+```bash
+sudo pacman -S --needed libvirt qemu-full edk2-ovmf libisoburn dnsutils
+sudo systemctl enable --now libvirtd
+sudo usermod -aG libvirt "$USER"
+```
+
+`lab doctor` fails with the exact missing package name, so a fresh host gets a
+named next step rather than a stack trace. Task 5's tests use a fake `virsh`
+and need none of this. Task 6 is the first task that does.
+
 ## Review Focus
 
 - A failed `lab up` leaves half its objects behind. Expectation: teardown runs from recorded state, and a teardown that cannot finish keeps its state and exits non-zero.
@@ -122,6 +152,7 @@ headings `## Linux mechanism`, `## Windows concept`, `## Where it breaks`,
 FAILURES=0
 EVIDENCE=${EVIDENCE:-run/evidence/static.log}
 mkdir -p "$(dirname "$EVIDENCE")"
+. build/checks.sh
 
 record() {
   local name=$1 status=$2 expected=$3 observed=$4
@@ -165,6 +196,10 @@ Modify `.gitignore`: keep `run/`, `build/vm/`, `build/out/`, `lab-secrets/`,
 Create `README.md` with the spec link, a status line and a pointer to
 `docs/runbooks/`. Create `LICENSE` with MIT text and `CHANGELOG.md` with
 `## Unreleased` and one entry naming this plan.
+
+`.gitignore` excludes `*.iso`, so the media fixture needs
+`git add -f tests/fixtures/leak-disc.iso`. Without the force-add the fixture is
+absent after a fresh clone and that assertion passes vacuously.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -310,6 +345,13 @@ cd "$(dirname "$0")/.."
 . build/common.sh
 img=$(lab_image dns)
 
+run_role_proof() {
+  local role=$1 proof
+  proof=$(sed -n '/^```proof$/,/^```$/p' "docs/roles/$role.md" | sed '1d;$d')
+  [ -n "$proof" ] || { echo "no proof block in docs/roles/$role.md"; return 1; }
+  podman run --rm "$(lab_image "$role")" bash -c "$proof"
+}
+
 assert_ok "bind installed"        podman run --rm "$img" rpm -q bind
 assert_ok "unbound installed"     podman run --rm "$img" rpm -q unbound
 assert_ok "zone file present"     podman run --rm "$img" test -s /var/named/lab.internal.zone
@@ -318,7 +360,7 @@ assert_ok "unbound config valid"  podman run --rm "$img" unbound-checkconf /etc/
 assert_ok "provision unit enabled" podman run --rm "$img" systemctl is-enabled ultus-provision.service
 assert_ok "health check executable" \
   podman run --rm "$img" test -x /etc/greenboot/check/required.d/50-dns-health.sh
-assert_ok "record proof passes"   podman run --rm "$img" named-checkconf /etc/named.conf
+assert_ok "record proof passes"   run_role_proof dns
 
 finish
 ```
@@ -335,11 +377,13 @@ Expected: FAIL, `bind installed: package bind is not installed`.
 `50-dns.sh` runs `systemctl enable ultus-provision.service ultus-dns-ready.service`
 and asserts both are enabled, exiting non-zero with the unit name on failure.
 
-`lab.internal.zone` is created here, not in a later task: a primary with `SOA`,
-`NS`, and an `A` for `base-a`. `named.conf` serves it from
-`/var/named/lab.internal.zone` and forwards nothing. `unbound.conf` listens on
-loopback and forwards `lab.internal` to `127.0.0.1`. Both files are the
-single-node default, and both are valid at build time.
+`lab.internal.zone` is created here, not in a later task: a primary with `SOA`
+and `NS`, and no host record. A build-time `A` record would carry one run's
+address into every image, so `provision.sh` appends this node's own `A` record
+at boot. `named.conf` serves the zone from `/var/named/lab.internal.zone` and
+forwards nothing. `unbound.conf` listens on loopback and forwards
+`lab.internal` to `127.0.0.1`. Both are the single-node default, valid at
+build time.
 
 `provision.sh` reads `/run/ultus-corp/node.json` and specialises that default:
 it rewrites the forwarder to the primary address, and when the node carries a
@@ -358,16 +402,24 @@ zone fails the boot visibly rather than inside a log.
 non-zero with the dig output when the answer is empty. It sits in `required.d`,
 so a dns image that boots but cannot answer rolls back.
 
-`docs/roles/dns.md` carries the four headings. Its proof is
-`named-checkconf -z /etc/named.conf`, which is the same command the gate runs.
+`docs/roles/dns.md` carries the four headings and one fenced `proof` block
+holding `named-checkconf -z /etc/named.conf`. `run_role_proof` extracts that
+block and runs it in the image, so the record is executed rather than read.
 
 - [ ] **Step 4: Record the resolved package set**
 
 Run `bash tests/test-packages.sh`, then
-`bash build/package-lock.sh resolve dns`.
-Expected: the test passes and `manifests/packages-dns.lock` lists real NEVRAs
-from Stream 10. Rebuild with the lock present and confirm the test still
-passes. Record the commands and the date in `docs/runbooks/packages.md`.
+`bash build/package-lock.sh resolve dns`. Expected: the test passes and
+`manifests/packages-dns.lock` lists real NEVRAs from Stream 10. Rebuild with
+the lock present, then prove the lock is what got installed:
+
+```bash
+diff <(podman run --rm "$(lab_image dns)" rpm -qa --qf '%{NAME}-%{EVR}.%{ARCH}\n' | sort) \
+     manifests/packages-dns.lock
+```
+
+Expected: no output. Record the commands and the date in
+`docs/runbooks/packages.md`.
 
 - [ ] **Step 5: Commit**
 
@@ -389,10 +441,12 @@ git commit -m "feat: dns role with zone, boot provisioning and package lock"
 
 **Interfaces:**
 - Produces: `render.py --scenario <id> --out <dir>` writing
-  `<out>/<segment>.network.xml`, `<out>/<node>.xml`, `<out>/<node>-seed.iso`
-  and `<out>/plan.json`.
+  `<out>/<scenario>-<segment>.network.xml`, `<out>/<node>.xml`,
+  `<out>/<node>-seed/{meta-data,user-data,network-config}` and `<out>/plan.json`.
+  The ISO is built later, by `lab up`, so the renderer never needs an ISO writer.
 - Produces: `load(path) -> Spec` returning validated dataclasses, and
-  `nodes_for(spec, scenario) -> list[Node]`, `network_xml(segment, spec) -> str`,
+  `nodes_for(spec, scenario) -> list[Node]`,
+  `network_xml(scenario_id, segment, spec) -> str`,
   `domain_xml(node, spec) -> str`, `seed_files(node, spec) -> dict[str, str]`.
 - Produces: naming contract `ultus-<scenario>-<node>` for domains and volumes,
   `ultus-<scenario>-<segment>` for networks.
@@ -402,18 +456,22 @@ git commit -m "feat: dns role with zone, boot provisioning and package lock"
 `tests/test_render.py`, using `unittest`:
 
 ```python
+import json
+
 spec = load("lab/lab.toml")
 self.assertEqual([n.name for n in nodes_for(spec, "s1-dns")], ["dns-a", "dns-b"])
-base = nodes_for(spec, "s0-base")[0]
-self.assertEqual(base.name, "base-a")
-self.assertNotEqual(base.name, nodes_for(spec, "s1-dns")[0].name)
+self.assertEqual([n.name for n in nodes_for(spec, "s0-base")], ["base-a"])
+self.assertEqual(nodes_for(spec, "s1-dns")[0].site, "dc")
 
 node = nodes_for(spec, "s1-dns")[0]
 xml = domain_xml(node, spec)
 self.assertIn("ultus-s1-dns-dns-a", xml)
 self.assertIn("<source network='ultus-s1-dns-mgmt'/>", xml)
+self.assertIn("<source network='ultus-s1-dns-data'/>", xml)
+self.assertNotIn("<forward", xml)
 
-net = network_xml(spec.sites["br1"].segments["mgmt"], spec)
+net = network_xml("s1-dns", spec.sites["dc"].segments["mgmt"], spec)
+self.assertIn("ultus-s1-dns-mgmt", net)
 self.assertIn("<forward mode='isolated'/>", net)
 self.assertIn("<dns enable='no'/>", net)
 self.assertNotIn("<dhcp", net)
@@ -427,9 +485,10 @@ for mac in macs:
     self.assertEqual(first & 0x02, 2)   # locally administered
 
 files = seed_files(node, spec)
-self.assertEqual(files["meta-data"].splitlines()[1], "instance-id: ultus-s1-dns-dns-a")
-self.assertIn("version: 2", files["network-config"])
-self.assertIn("10.11.10.11/24", files["network-config"])
+self.assertIn("instance-id: ultus-s1-dns-dns-a", files["meta-data"])
+network = json.loads(files["network-config"])
+self.assertEqual(network["version"], 2)
+self.assertIn("10.100.10.11/24", files["network-config"])
 
 with self.assertRaises(ValueError):
     nodes_for(spec, "nope")
@@ -453,12 +512,22 @@ domain = "lab.internal"
 overlay = "10.255.0.0/16"
 
 [[site]]
-id = "br1"
-prefix = "10.11.0.0/16"
+id = "dc"
+prefix = "10.100.0.0/16"
 
   [[site.segment]]
   name = "mgmt"
-  cidr = "10.11.10.0/24"
+  cidr = "10.100.10.0/24"
+
+  [[site.segment]]
+  name = "data"
+  cidr = "10.100.20.0/24"
+
+[[scenario]]
+id = "s0-base"
+title = "bootable image"
+vm_budget = 1
+ram_budget_mib = 2048
 
 [[scenario]]
 id = "s1-dns"
@@ -467,9 +536,9 @@ vm_budget = 2
 ram_budget_mib = 3072
 
 [[node]]
-scenario = "s1-dns"
-name = "dns-a"
-site = "br1"
+scenario = "s0-base"
+name = "base-a"
+site = "dc"
 role = "dns"
 vcpus = 1
 ram_mib = 1024
@@ -477,9 +546,45 @@ disk_gib = 8
 
   [[node.interface]]
   segment = "mgmt"
-  address = "10.11.10.11"
-  gateway = "10.11.10.1"
-  nameservers = ["10.11.10.11"]
+  address = "10.100.10.20"
+  gateway = "10.100.10.1"
+  nameservers = ["10.100.10.20"]
+
+[[node]]
+scenario = "s1-dns"
+name = "dns-a"
+site = "dc"
+role = "dns"
+vcpus = 1
+ram_mib = 1024
+disk_gib = 8
+
+  [[node.interface]]
+  segment = "mgmt"
+  address = "10.100.10.11"
+  gateway = "10.100.10.1"
+  nameservers = ["10.100.10.11"]
+
+  [[node.interface]]
+  segment = "data"
+  address = "10.100.20.11"
+  gateway = "10.100.20.1"
+  nameservers = ["10.100.10.11"]
+
+[[node]]
+scenario = "s1-dns"
+name = "dns-b"
+site = "dc"
+role = "dns"
+vcpus = 1
+ram_mib = 1024
+disk_gib = 8
+
+  [[node.interface]]
+  segment = "mgmt"
+  address = "10.100.10.12"
+  gateway = "10.100.10.1"
+  nameservers = ["10.100.10.11"]
 ```
 
 `render.py` loads with `tomllib`, converts into frozen dataclasses
@@ -855,6 +960,19 @@ The gate reads rendered XML, not live `virsh` output, so it runs in CI and on a
 host with no domain up. `lab doctor --host-uplinks` prints the host's physical
 addresses and prefixes, excluding the default route and every `ultus-*`
 interface, so the comparison cannot flag the lab's own networks.
+
+`test-isolation.sh` also runs the Task 1 checks on the real tree, not only on
+fixtures:
+
+```bash
+assert_ok "real base pin"       check_base_pin manifests/base.txt Containerfile.*
+assert_ok "real manifests"      check_manifest_one_per_line manifests/packages-*.txt
+assert_ok "real tree secrets"   check_no_secret_patterns .
+assert_ok "real role records"   check_role_records docs/roles
+```
+
+The secret scan skips `run/` and `.git/`. The media scan skips
+`tests/fixtures/`, which holds one deliberate `.iso` fixture.
 
 `docs/runbooks/scenarios.md` documents the one-scenario contract, the
 ten-minute rebuild rule, the teardown expectation, the measured wall time and
