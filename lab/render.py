@@ -349,6 +349,12 @@ def domain_xml(node: Node, spec: Spec) -> str:
         f"      <source file='run/{node.scenario}/{domain}.qcow2'/>\n"
         "      <target dev='vda' bus='virtio'/>\n"
         "    </disk>\n"
+        "    <disk type='file' device='cdrom'>\n"
+        "      <driver name='qemu' type='raw'/>\n"
+        f"      <source file='run/{node.scenario}/{domain}-seed.iso'/>\n"
+        "      <target dev='sda' bus='sata'/>\n"
+        "      <readonly/>\n"
+        "    </disk>\n"
         f"{interfaces}"
         "    <console type='pty'/>\n"
         "  </devices>\n"
@@ -361,7 +367,7 @@ def _prefix_for(node: Node, spec: Spec, segment_name: str) -> int:
     return ipaddress.IPv4Network(cidr).prefixlen
 
 
-def seed_files(node: Node, spec: Spec) -> dict[str, str]:
+def seed_files(node: Node, spec: Spec, ssh_key: str | None = None) -> dict[str, str]:
     """NoCloud seed as three strings. JSON is a valid YAML subset."""
     instance_id = f"ultus-{node.scenario}-{node.name}"
     fqdn = f"{node.name}.{spec.lab.domain}"
@@ -399,6 +405,13 @@ def seed_files(node: Node, spec: Spec) -> dict[str, str]:
         {
             "hostname": node.name,
             "fqdn": fqdn,
+            "disable_root": False,
+            "ssh_pwauth": False,
+            "users": (
+                [{"name": "root", "ssh_authorized_keys": [ssh_key]}]
+                if ssh_key
+                else []
+            ),
             "write_files": [
                 {
                     "path": "/run/ultus-corp/node.json",

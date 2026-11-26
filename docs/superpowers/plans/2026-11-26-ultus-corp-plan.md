@@ -770,7 +770,6 @@ git commit -m "feat: lab CLI with typed state and explicit teardown contract"
 - Create: `lab/build-disk.sh`
 - Create: `manifests/builder.txt`
 - Create: `tests/scenarios/s0-base.sh`
-- Modify: `lab/lab.toml` (add the `s0-base` node `base-a`)
 - Create: `docs/runbooks/first-boot.md`
 
 **Interfaces:**
@@ -815,13 +814,18 @@ record it here and in `docs/runbooks/first-boot.md`, and never use `:latest`:
 
 ```bash
 podman run --rm --privileged --security-opt label=type:unconfined_t \
-  -v "$PWD/build/vm/blueprint.toml:/blueprint.toml:ro" \
+  -v "$PWD/build/vm/blueprint.toml:/config.toml:ro" \
   -v "$PWD/build/vm:/output" \
   -v /var/lib/containers/storage:/var/lib/containers/storage \
   "$(cat manifests/builder.txt)" \
-  build --blueprint /blueprint.toml --output-dir /output \
-  --bootc-ref "$(lab_image "$role")" --bootc-default-fs xfs qcow2
+  build --type qcow2 --rootfs xfs --output /output \
+  --config /config.toml "$(lab_image "$role")"
 ```
+
+The image name is positional, the blueprint is `--config`, and the qcow2 lands
+at `build/vm/qcow2/disk.qcow2`. The builder is
+`quay.io/centos-bootc/bootc-image-builder`, pinned by digest in
+`manifests/builder.txt`.
 
 `blueprint.toml` sets the root filesystem to `xfs` and the operator user with
 the key from `lab-secrets/id_ed25519.pub`, read at build time and never

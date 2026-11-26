@@ -52,12 +52,48 @@ def scenario_segments(spec: render.Spec, scenario: str) -> list[render.Segment]:
     return list(seen.values())
 
 
-def create_seed(node: render.Node, spec: render.Spec, run_dir: Path) -> Path:
+def ssh_key() -> str:
+    secrets = ROOT / "lab-secrets"
+    secrets.mkdir(mode=0o700, exist_ok=True)
+    key = secrets / "id_ed25519"
+    if not key.exists():
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "ultus-corp", "-f", str(key)],
+            check=True,
+        )
+        os.chmod(key, 0o600)
+    return (secrets / "id_ed25519.pub").read_text(encoding="utf-8").strip()
+
+
+def make_seed_iso(seed_dir: Path, iso: Path) -> None:
+    tool = shutil.which("xorriso")
+    if tool:
+        command = [tool, "-as", "mkisofs", "-quiet"]
+    elif shutil.which("genisoimage"):
+        command = [shutil.which("genisoimage"), "-quiet"]
+    else:
+        raise RuntimeError("xorriso or genisoimage is required for the NoCloud seed")
+    command += [
+        "-output",
+        str(iso),
+        "-volid",
+        "cidata",
+        "-joliet",
+        "-rock",
+        str(seed_dir),
+    ]
+    subprocess.run(command, check=True, cwd=ROOT)
+    os.chmod(iso, 0o600)
+
+
+def create_seed(
+    node: render.Node, spec: render.Spec, run_dir: Path, public_key: str
+) -> Path:
     node_dir = run_dir / "seed" / node.name
     node_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(run_dir / "seed", 0o700)
     os.chmod(node_dir, 0o700)
-    for name, content in render.seed_files(node, spec).items():
+    for name, content in render.seed_files(node, spec, public_key).items():
         target = node_dir / name
         target.write_text(content, encoding="utf-8")
         os.chmod(target, 0o600)
@@ -98,7 +134,7 @@ def delete(resource: dict) -> None:
         done = virsh("net-undefine", name)
         if done.returncode != 0:
             raise RuntimeError(f"cannot undefine {name}: {done.stderr.strip()}")
-    elif kind in {"volume", "seed"}:
+    elif kind in {"volume", "seed", "seediso"}:
         target = ROOT / resource["path"]
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
@@ -169,13 +205,24 @@ def cmd_up(args: argparse.Namespace) -> int:
                 raise RuntimeError(f"net-start {name}: {done.stderr.strip()}")
 
         for node in nodes:
-            seed_dir = create_seed(node, spec, run_dir)
+            seed_dir = create_seed(node, spec, run_dir, ssh_key())
             runstate.add(
                 state,
                 "seed",
                 f"ultus-{scenario}-{node.name}-seed",
                 path=str(seed_dir.relative_to(ROOT)),
                 mode="0700",
+            )
+            runstate.write(state_file, state)
+
+            iso = run_dir / f"ultus-{scenario}-{node.name}-seed.iso"
+            make_seed_iso(seed_dir, iso)
+            runstate.add(
+                state,
+                "seediso",
+                iso.name,
+                path=str(iso.relative_to(ROOT)),
+                mode="0600",
             )
             runstate.write(state_file, state)
 
