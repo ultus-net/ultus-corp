@@ -46,7 +46,7 @@ fi
 sed -i "s/^\( *forward-addr: \).*/\1${forward}/" /etc/unbound/unbound.conf
 
 short=${name%%.*}
-sed -i "s/dns-a\./${short}./g; s/127\.0\.0\.2/${address}/g" /var/named/lab.internal.zone
+sed -i "s/\bdns-a\b/${short}/g; s/127\.0\.0\.2/${address}/g" /var/named/lab.internal.zone
 
 named-checkconf -z /etc/named.conf
 unbound-checkconf

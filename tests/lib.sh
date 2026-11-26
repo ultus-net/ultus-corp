@@ -5,6 +5,8 @@ _name=${_name#test-}
 EVIDENCE=${EVIDENCE:-run/evidence/$_name.log}
 mkdir -p "$(dirname "$EVIDENCE")"
 : > "$EVIDENCE"
+export LIBVIRT_DEFAULT_URI=${LIBVIRT_DEFAULT_URI:-qemu:///system}
+RUN=${LAB_RUN_DIR:-run}
 . build/checks.sh
 
 record() {

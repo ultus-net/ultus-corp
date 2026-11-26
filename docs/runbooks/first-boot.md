@@ -33,8 +33,23 @@ once, as root:
 ```bash
 sudo pacman -S --needed libvirt qemu-full edk2-ovmf libisoburn dnsutils
 sudo systemctl enable --now libvirtd
-sudo usermod -aG libvirt "$USER"
 ```
+
+On this host the libvirt socket is world-accessible, so no group membership is
+needed. Where it is `0660 root:libvirt` instead, add `sudo usermod -aG libvirt
+"$USER"` and start a new login session.
+
+The run tree has to be traversable by the qemu user, and a `0700` home is the
+common case that breaks it. Keep the default and relax the home, or relocate:
+
+```bash
+chmod o+x ~
+# or
+export LAB_RUN_DIR=/var/tmp/ultus-corp
+```
+
+`lab doctor` reports this as "unreachable for the qemu user" and names both
+remedies. Domain XML always carries absolute paths, so the relocation is free.
 
 `bootc-image-builder` needs rootful podman because it mounts loop devices, so
 the disk build is the one step that escalates. Point `LAB_PODMAN` at it:

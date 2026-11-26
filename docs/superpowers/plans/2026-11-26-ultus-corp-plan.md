@@ -17,7 +17,7 @@
 - P0 builds the primary DC hub and the branches. The DR DC is evolution stage 3 in the design and is not a P0 scenario.
 - One scenario resident at a time. A single scenario stays below five VMs and at most 10 GiB RAM.
 - `lab down` leaves no domain, network, volume or generated key, and a second `lab up` succeeds.
-- No libvirt network may forward to the host LAN. Every rendered network is `<forward mode='isolated'/>`, with no DHCP and no libvirt DNS.
+- No libvirt network may forward to the host LAN. libvirt has no `isolated` forward mode, so a rendered network omits `<forward>` entirely, which is what makes it isolated. It carries no DHCP and no libvirt DNS.
 - Secrets never enter git, an image, or a rendered file inside the tree. `lab-secrets/` is gitignored, runtime material lives under `run/` with mode `0700`.
 - Renderer uses the Python standard library only. No PyYAML, no external YAML parser.
 - Every role `FROM` the base in `manifests/base.txt`, passed as `--build-arg BASE=…`.
@@ -313,8 +313,10 @@ from the build script so it runs on a cached build.
 Task 2 therefore creates
 `modules/base/usr/libexec/ultus-corp/build.d/00-base.sh`, which asserts the base
 contract the other modules rely on: `bootc` and `greenboot` are installed and
-the bootc unit is present. `COPY modules/base/ /` copies the tree's contents onto
-`/`. Task 3 adds `COPY modules/dns/ /` beside it.
+the bootc unit is present. It also enables `greenboot-healthcheck.service`: the
+package ships it disabled, and a required check that never runs proves nothing.
+`COPY modules/base/ /` copies the tree's contents onto `/`. Task 3 adds
+`COPY modules/dns/ /` beside it.
 
 `build/package-lock.sh resolve <role>` builds the image, then writes
 `podman run --rm "$(lab_image "$role")" rpm -qa --qf '%{NAME}-%{EVR}.%{ARCH}\n' | grep -v '^gpg-pubkey-' | sort`
@@ -418,6 +420,15 @@ stanza with `masters` and `allow-transfer` instead of the primary stanza. It
 then runs `named-checkconf`. It is the only place node-specific configuration is
 produced, because build time cannot see the seed. The rewrite is idempotent.
 
+The owner-name rewrite matches the bare token `dns-a`, not a dotted FQDN. The
+`A` record owner is written without a trailing dot, so a `dns-a\.` pattern
+renames `SOA` and `NS` but leaves the `A` owner behind, and `named-checkconf -z`
+then rejects an `NS` target with no address.
+
+`50-dns.sh` enables `unbound.service` alongside the two ultus units. Nothing
+else pulls it, and the required check queries `127.0.0.1`, so an unenabled
+resolver turns a healthy node into a failed boot.
+
 `ultus-provision.service` is `Type=oneshot`, `RemainAfterExit=yes`, ordered
 `Before=named.service`, and runs `provision.sh` as root.
 
@@ -508,9 +519,10 @@ self.assertNotIn("<forward", xml)
 
 net = network_xml("s1-dns", spec.sites["dc"].segments["mgmt"], spec)
 self.assertIn("ultus-s1-dns-mgmt", net)
-self.assertIn("<forward mode='isolated'/>", net)
+self.assertNotIn("<forward", net)
 self.assertIn("<dns enable='no'/>", net)
 self.assertNotIn("<dhcp", net)
+self.assertNotIn("<bridge", net)
 
 macs = [interface_mac(s.id, n.name, i.segment) for s in spec.scenarios.values()
         for n in nodes_for(spec, s.id) for i in n.interfaces]
@@ -635,9 +647,11 @@ node set that exceeds its scenario's VM or RAM budget. Every failure raises
 bit: `first = (digest[0] | 0x02) & 0xfe`. The renderer then asserts the six
 octets are unique across every interface in the spec.
 
-`network_xml` emits `<forward mode='isolated'/>`, one `<ip address=… prefix=…>`
-and a `<dns enable='no'/>` child. There is no `<dhcp>` element and no
-`<bridge name=…>`, so libvirt starts no dnsmasq and no DHCP.
+`network_xml` emits no `<forward>` element, one `<ip address=… prefix=…>` and a
+`<dns enable='no'/>` child. libvirt rejects `mode='isolated'` with "unknown
+forwarding type", and the absence of `<forward>` is what isolates the network.
+There is no `<dhcp>` element and no `<bridge name=…>`, so libvirt starts no
+dnsmasq and no DHCP.
 
 `seed_files` returns three strings. `meta-data` carries the scenario-scoped
 instance id and the FQDN. `user-data` is `#cloud-config` followed by
@@ -852,6 +866,21 @@ the key from `lab-secrets/id_ed25519.pub`, read at build time and never
 committed. `lab up` calls `build-disk.sh` before creating the volume, then
 copies the cached disk into the scenario directory.
 
+Booting the guest corrected five assumptions, each of which fails silently:
+
+- libvirt's default `qemu64` CPU model lacks SSE4.2, which CentOS Stream 10
+  requires, so the domain pins `<cpu mode='host-passthrough'/>` and enables
+  `<acpi/>` and `<apic/>`.
+- The system-mode daemon does not share the caller's working directory, so every
+  `<source file=…>` is absolute.
+- `network-config` matches the NIC by MAC, because the guest names a virtio NIC
+  `ens2`, and spells the default route `0.0.0.0/0`, because cloud-init 24.4
+  raises on `to: default` and then drops the whole config.
+- The qemu user must be able to traverse the run directory. A `0700` home is
+  common, so `lab doctor` names the gap and `LAB_RUN_DIR` relocates the tree.
+- A file-backed console is created root-only, so the domain keeps a pty console
+  and a `qemu-guest-agent` channel instead.
+
 `docs/runbooks/first-boot.md` names every mechanism this scenario exercises
 (`bootc` install, the NoCloud seed, `systemd`, `qemu-guest-agent`) with the
 Windows equivalent beside it, and states where each analogy breaks.
@@ -1002,7 +1031,7 @@ git commit -m "feat: CI gates, digest-scoped signing and verified repin"
 - [ ] **Step 1: Write the failing test**
 
 `tests/test-isolation.sh` renders every scenario and asserts each network XML
-contains `<forward mode='isolated'/>`, contains no `<dhcp`, no
+contains no `<forward`, no `<dhcp`, no
 `<bridge name=`, and `<dns enable='no'/>`. It asserts every lab CIDR is
 disjoint from every non-default CIDR in `ip -j route show`, using
 `lab doctor --host-uplinks` for the physical addresses. It asserts a

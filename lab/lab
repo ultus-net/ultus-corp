@@ -18,7 +18,8 @@ sys.path.insert(0, str(HERE))
 import render  # noqa: E402
 import state as runstate  # noqa: E402
 
-RUN = ROOT / "run"
+os.environ.setdefault("LIBVIRT_DEFAULT_URI", "qemu:///system")
+RUN = Path(os.environ.get("LAB_RUN_DIR") or ROOT / "run")
 SPEC = ROOT / "lab" / "lab.toml"
 
 
@@ -83,7 +84,8 @@ def make_seed_iso(seed_dir: Path, iso: Path) -> None:
         str(seed_dir),
     ]
     subprocess.run(command, check=True, cwd=ROOT)
-    os.chmod(iso, 0o600)
+    # The qemu user reads the ISO, and it holds only public key material.
+    os.chmod(iso, 0o644)
 
 
 def create_seed(
@@ -134,8 +136,8 @@ def delete(resource: dict) -> None:
         done = virsh("net-undefine", name)
         if done.returncode != 0:
             raise RuntimeError(f"cannot undefine {name}: {done.stderr.strip()}")
-    elif kind in {"volume", "seed", "seediso"}:
-        target = ROOT / resource["path"]
+    elif kind in {"volume", "seed", "seediso", "log"}:
+        target = Path(resource["path"])
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
         else:
@@ -212,7 +214,7 @@ def cmd_up(args: argparse.Namespace) -> int:
                 state,
                 "seed",
                 f"ultus-{scenario}-{node.name}-seed",
-                path=str(seed_dir.relative_to(ROOT)),
+                path=str(seed_dir),
                 mode="0700",
             )
             runstate.write(state_file, state)
@@ -223,8 +225,8 @@ def cmd_up(args: argparse.Namespace) -> int:
                 state,
                 "seediso",
                 iso.name,
-                path=str(iso.relative_to(ROOT)),
-                mode="0600",
+                path=str(iso),
+                mode="0644",
             )
             runstate.write(state_file, state)
 
@@ -234,12 +236,12 @@ def cmd_up(args: argparse.Namespace) -> int:
                 state,
                 "volume",
                 volume.name,
-                path=str(volume.relative_to(ROOT)),
+                path=str(volume),
             )
             runstate.write(state_file, state)
 
             xml = render_dir / f"{node.name}.xml"
-            xml.write_text(render.domain_xml(node, spec), encoding="utf-8")
+            xml.write_text(render.domain_xml(node, spec, RUN), encoding="utf-8")
             done = virsh("define", str(xml))
             if done.returncode != 0:
                 raise RuntimeError(f"define {node.name}: {done.stderr.strip()}")
@@ -324,6 +326,28 @@ def cmd_test(args: argparse.Namespace) -> int:
     return subprocess.run(["bash", str(script)], cwd=ROOT).returncode
 
 
+def uncached_roles() -> list[str]:
+    """Roles with no built disk, which is the only case that needs root."""
+    try:
+        spec = render.load(SPEC)
+    except ValueError:
+        return []
+    cache = ROOT / "build" / "vm" / "cache"
+    return sorted(
+        role
+        for role in {node.role for node in spec.nodes}
+        if not any(cache.glob(f"{role}-*.qcow2"))
+    )
+
+
+def traversable(path: Path) -> bool:
+    """Every existing ancestor must be executable, or qemu cannot open a file."""
+    for part in [path, *path.parents]:
+        if part.exists() and not part.stat().st_mode & 0o001:
+            return False
+    return True
+
+
 def cmd_doctor(_: argparse.Namespace) -> int:
     problems = []
     if sys.version_info < (3, 11):
@@ -339,19 +363,27 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     if shutil.which(podman[0]) is None:
         problems.append(podman[0])
     else:
-        rootless = subprocess.run(
-            [*podman, "info", "--format", "{{.Host.Security.Rootless}}"],
-            capture_output=True,
-            text=True,
-        )
-        if rootless.stdout.strip() == "true":
-            problems.append(
-                "rootful podman for the disk build (set LAB_PODMAN, "
-                "for example LAB_PODMAN='sudo podman')"
+        pending = uncached_roles()
+        if pending:
+            rootless = subprocess.run(
+                [*podman, "info", "--format", "{{.Host.Security.Rootless}}"],
+                capture_output=True,
+                text=True,
             )
+            if rootless.stdout.strip() == "true":
+                problems.append(
+                    "rootful podman for an uncached disk ("
+                    + ", ".join(pending)
+                    + "); set LAB_PODMAN='sudo podman'"
+                )
     free = shutil.disk_usage(ROOT).free
     if free < 10 * 1024**3:
         problems.append("10 GiB free disk")
+    if not traversable(RUN):
+        problems.append(
+            f"{RUN} is unreachable for the qemu user "
+            "(chmod o+x each parent directory, or set LAB_RUN_DIR)"
+        )
     if problems:
         print("missing: " + ", ".join(problems), file=sys.stderr)
         return 1

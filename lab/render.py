@@ -14,6 +14,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+
 __all__ = [
     "Lab",
     "Site",
@@ -310,21 +312,25 @@ def nodes_for(spec: Spec, scenario: str) -> list[Node]:
 
 
 def network_xml(scenario: str, segment: Segment, spec: Spec) -> str:
-    """An isolated libvirt network: no forward to the host, no DHCP, no DNS."""
+    """An isolated libvirt network: no `<forward>`, so no uplink, DHCP or DNS."""
     net = ipaddress.IPv4Network(segment.cidr)
     gateway = next(net.hosts())
     return (
         "<network>\n"
         f"  <name>ultus-{scenario}-{segment.name}</name>\n"
-        "  <forward mode='isolated'/>\n"
         "  <dns enable='no'/>\n"
         f"  <ip address='{gateway}' prefix='{net.prefixlen}'/>\n"
         "</network>\n"
     )
 
 
-def domain_xml(node: Node, spec: Spec) -> str:
-    """Domain XML with one isolated network interface per declared segment."""
+def domain_xml(node: Node, spec: Spec, run_dir: Path | None = None) -> str:
+    """Domain XML with one isolated network interface per declared segment.
+
+    Paths are absolute because the system-mode daemon does not share the
+    caller's working directory.
+    """
+    base = Path(run_dir) if run_dir else ROOT / "run"
     domain = f"ultus-{node.scenario}-{node.name}"
     interfaces = "".join(
         "    <interface type='network'>\n"
@@ -343,20 +349,29 @@ def domain_xml(node: Node, spec: Spec) -> str:
         "    <type arch='x86_64'>hvm</type>\n"
         "    <boot dev='hd'/>\n"
         "  </os>\n"
+        "  <features>\n"
+        "    <acpi/>\n"
+        "    <apic/>\n"
+        "  </features>\n"
+        "  <cpu mode='host-passthrough'/>\n"
         "  <devices>\n"
         "    <disk type='file' device='disk'>\n"
         "      <driver name='qemu' type='qcow2'/>\n"
-        f"      <source file='run/{node.scenario}/{domain}.qcow2'/>\n"
+        f"      <source file='{base}/{node.scenario}/{domain}.qcow2'/>\n"
         "      <target dev='vda' bus='virtio'/>\n"
         "    </disk>\n"
         "    <disk type='file' device='cdrom'>\n"
         "      <driver name='qemu' type='raw'/>\n"
-        f"      <source file='run/{node.scenario}/{domain}-seed.iso'/>\n"
+        f"      <source file='{base}/{node.scenario}/{domain}-seed.iso'/>\n"
         "      <target dev='sda' bus='sata'/>\n"
         "      <readonly/>\n"
         "    </disk>\n"
         f"{interfaces}"
+        "    <serial type='pty'/>\n"
         "    <console type='pty'/>\n"
+        "    <channel type='unix'>\n"
+        "      <target type='virtio' name='org.qemu.guest_agent.0'/>\n"
+        "    </channel>\n"
         "  </devices>\n"
         "</domain>\n"
     )
@@ -378,8 +393,13 @@ def seed_files(node: Node, spec: Spec, ssh_key: str | None = None) -> dict[str, 
     for index, iface in enumerate(node.interfaces):
         prefix = _prefix_for(node, spec, iface.segment)
         ethernets[f"eth{index}"] = {
+            # Predictable network names differ per bus and host, so match the
+            # deterministic MAC this renderer assigns instead of a device name.
+            "match": {"macaddress": interface_mac(node.scenario, node.name, iface.segment)},
             "addresses": [f"{iface.address}/{prefix}"],
-            "routes": [{"to": "default", "via": iface.gateway}],
+            # cloud-init 24.4 rejects `to: default` and then drops the whole
+            # config, so the default route is spelled as a prefix.
+            "routes": [{"to": "0.0.0.0/0", "via": iface.gateway}],
             "nameservers": {"addresses": iface.nameservers},
         }
     network = {"version": 2, "ethernets": ethernets}

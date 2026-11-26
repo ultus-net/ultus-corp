@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for unit in ultus-provision.service ultus-dns-ready.service; do
+for unit in ultus-provision.service ultus-dns-ready.service unbound.service; do
   systemctl enable "$unit"
   systemctl is-enabled --quiet "$unit" || {
     echo "failed to enable $unit" >&2

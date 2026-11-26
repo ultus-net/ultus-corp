@@ -4,7 +4,7 @@ cd "$(dirname "$0")/../.."
 . tests/lib.sh
 
 lab up s0-base
-addr=$(python3 -c 'import json;print(json.load(open("run/s0-base/state.json"))["nodes"]["base-a"]["address"])')
+addr=$(python3 -c 'import json,os;print(json.load(open(os.environ["RUN"] + "/s0-base/state.json"))["nodes"]["base-a"]["address"])')
 
 assert_eq "domain running" "running" "$(virsh domstate ultus-s0-base-base-a)"
 assert_ok "guest reachable" timeout 120 bash -c "until ping -c1 -W1 $addr; do sleep 2; done"
@@ -16,6 +16,6 @@ assert_ok "no libvirt dnsmasq on the segment" \
   bash -c "! pgrep -af 'dnsmasq.*ultus-s0-base'"
 lab down s0-base
 assert_ok "no domain left" bash -c "! virsh list --all --name | grep -q ultus-s0-base"
-assert_ok "seed removed"   bash -c "! test -e run/s0-base/seed"
+assert_ok "seed removed"   bash -c "! test -e $RUN/s0-base/seed"
 
 finish

@@ -2,6 +2,8 @@ import unittest
 
 import json
 
+from pathlib import Path
+
 from lab.render import load, nodes_for, network_xml, domain_xml, seed_files, interface_mac, Spec, Node, Segment
 
 
@@ -40,10 +42,12 @@ class TestNodesFor(unittest.TestCase):
 
 
 class TestNetworkXml(unittest.TestCase):
-    def test_network_xml_forward_isolated(self):
+    def test_network_xml_has_no_forward(self):
         spec = load("lab/lab.toml")
         net = network_xml("s1-dns", spec.sites["dc"].segments["mgmt"], spec)
-        self.assertIn("<forward mode='isolated'/>", net)
+        # libvirt has no `isolated` forward mode: no <forward> is what isolates it.
+        self.assertNotIn("<forward", net)
+        self.assertIn("<name>ultus-s1-dns-mgmt</name>", net)
 
     def test_network_xml_dns_disabled(self):
         spec = load("lab/lab.toml")
@@ -85,6 +89,22 @@ class TestDomainXml(unittest.TestCase):
         self.assertIn("device='cdrom'", xml)
         self.assertIn("run/s1-dns/ultus-s1-dns-dns-a-seed.iso", xml)
         self.assertIn("<readonly/>", xml)
+
+    def test_domain_xml_uses_the_host_cpu(self):
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        xml = domain_xml(dns_a, spec)
+        # qemu64 lacks SSE4.2, which CentOS Stream 10 requires.
+        self.assertIn("<cpu mode='host-passthrough'/>", xml)
+        self.assertIn("<acpi/>", xml)
+
+    def test_domain_xml_exposes_a_console_and_agent(self):
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        xml = domain_xml(dns_a, spec, Path("/lab/run"))
+        # A file-backed console is root-only, so the user needs a pty.
+        self.assertIn("<serial type='pty'/>", xml)
+        self.assertIn("org.qemu.guest_agent.0", xml)
 
 
 class TestInterfaceMac(unittest.TestCase):
@@ -136,6 +156,23 @@ class TestSeedFiles(unittest.TestCase):
         # Check addresses are formatted as mask/prefix
         self.assertIn("10.100.10.11/24", files["network-config"])
         self.assertIn("10.100.20.11/24", files["network-config"])
+
+    def test_seed_files_network_config_matches_by_mac(self):
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        files = seed_files(dns_a, spec)
+        nic = json.loads(files["network-config"])["ethernets"]["eth0"]
+        self.assertEqual(
+            nic["match"]["macaddress"], interface_mac("s1-dns", "dns-a", "mgmt")
+        )
+
+    def test_seed_files_default_route_is_a_prefix(self):
+        # cloud-init 24.4 raises on `to: default` and drops the whole config.
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        network = json.loads(seed_files(dns_a, spec)["network-config"])
+        routes = network["ethernets"]["eth0"]["routes"]
+        self.assertEqual(routes, [{"to": "0.0.0.0/0", "via": "10.100.10.1"}])
 
     def test_seed_files_installs_ssh_key(self):
         spec = load("lab/lab.toml")
