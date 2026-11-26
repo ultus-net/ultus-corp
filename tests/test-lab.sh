@@ -46,8 +46,11 @@ assert_ok    "force down clears state"     bash -c '! test -e run/s0-base/state.
 mkdir -p build/vm/cache
 export FAKE_IMAGE_ID=fakeimageid0000000000000000000000000000000000000000000000000000
 printf 'cached\n' > build/vm/cache/dns-fakeimageid0.qcow2
+printf '%s\n' "$FAKE_IMAGE_ID" > build/vm/cache/dns-fakeimageid0.qcow2.id
 assert_ok    "cached disk skips the builder" bash -c 'lab/build-disk.sh dns run/cache-test.qcow2'
 assert_eq    "cached disk is copied" "cached" "$(cat run/cache-test.qcow2)"
+python3 -c 'import pathlib; pathlib.Path("build/vm/cache/dns-fakeimageid0.qcow2.id").unlink()'
+assert_fails "an unproven cache entry is not trusted" lab/build-disk.sh dns run/cache-test.qcow2
 rm -f build/vm/cache/dns-fakeimageid0.qcow2 run/cache-test.qcow2
 assert_fails "rootless podman is refused"    lab/build-disk.sh dns run/no-cache.qcow2
 

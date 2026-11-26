@@ -864,13 +864,17 @@ into that storage on every cache miss. It then compares the id in that storage
 with the id it built, and fails on a mismatch. A tag can exist there and point
 at an older image, and a builder given that tag emits a disk that boots but
 runs none of the current module code. The qcow2 is cached at
-`build/vm/cache/<role>-<image-id>.qcow2`, so the privileged step runs once per
-image and a later `lab up` needs no root. The builder writes into a fresh
+`build/vm/cache/<role>-<image-id>.qcow2` beside a `<disk>.id` file holding the
+full id, so the privileged step runs once per image and a later `lab up` needs
+no root. A cache hit requires that id file, so a disk of unrecorded origin is
+rebuilt rather than served, and `lab doctor` still asks for rootful podman while
+one is pending. The builder writes into a fresh
 `build/vm/build-XXXXXX` directory and hands the output back with `--chown`,
 because a rootful run leaves its output root-owned and a reused path then
 cannot be cleaned. `tests/test-lab.sh` proves each path with a fake `podman`: a
 cache hit never runs the builder, rootless podman is refused, a stale build
-storage is reloaded, and a mismatched load fails.
+storage is reloaded, a mismatched load fails, and a cache entry without its id
+file is rebuilt.
 
 `blueprint.toml` sets the root filesystem to `xfs` and the operator user with
 the key from `lab-secrets/id_ed25519.pub`, read at build time and never

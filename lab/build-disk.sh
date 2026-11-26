@@ -19,7 +19,10 @@ fi
 id_full=$(podman image inspect --format '{{.Id}}' "$image")
 id=${id_full:0:12}
 cache="build/vm/cache/$role-$id.qcow2"
-if [ -f "$cache" ]; then
+# The file name alone cannot prove the disk's origin: a pre-fix build stored an
+# older image's disk under this id, and a cache hit then served it. So a hit
+# also needs the id recorded beside the disk.
+if [ -f "$cache" ] && [ "$(cat "$cache.id" 2>/dev/null)" = "$id_full" ]; then
   cp -f "$cache" "$out"
   echo "disk for $role from $cache"
   exit 0
@@ -68,6 +71,7 @@ outdir=$(mktemp -d build/vm/build-XXXXXX)
 
 mkdir -p "$(dirname "$cache")"
 cp -f "$outdir/qcow2/disk.qcow2" "$cache"
+printf '%s\n' "$id_full" > "$cache.id"
 cp -f "$cache" "$out"
 rm -rf "$outdir"
 echo "disk for $role at $out"

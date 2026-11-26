@@ -68,6 +68,10 @@ carry an older image, and a builder fed that tag emits a disk with none of the
 new module code. The comparison turns that silent staleness into a failed
 build.
 
+A cache hit needs the id recorded beside the disk in `<disk>.id`. A disk whose
+origin is unrecorded is rebuilt rather than trusted, and `lab doctor` still
+asks for rootful podman while one is pending.
+
 ## Known gaps
 
 - The disk build needs the `bootc-image-builder` container and about 5 GiB of
