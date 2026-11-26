@@ -1,0 +1,3 @@
+This file is for testing the private-key pattern detection.
+It contains the phrase "-----BEGIN OPENSSH PRIVATE KEY-----"
+and similar patterns to verify that the check detects them.
