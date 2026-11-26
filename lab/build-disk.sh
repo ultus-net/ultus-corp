@@ -47,16 +47,20 @@ key = "$pub"
 groups = ["wheel"]
 EOF
 
-rm -rf build/vm/qcow2
+# A fresh directory per build: a rootful run leaves its output root-owned, and
+# reusing the path would then fail to clean up on the next attempt.
+outdir=$(mktemp -d build/vm/build-XXXXXX)
 "${podman[@]}" run --rm --privileged --security-opt label=type:unconfined_t \
   -v "$PWD/build/vm/blueprint.toml:/config.toml:ro" \
-  -v "$PWD/build/vm:/output" \
+  -v "$PWD/$outdir:/output" \
   -v /var/lib/containers/storage:/var/lib/containers/storage \
   "$(cat manifests/builder.txt)" \
   build --type qcow2 --rootfs xfs --output /output \
+  --chown "$(id -u):$(id -g)" \
   --config /config.toml "$image"
 
 mkdir -p "$(dirname "$cache")"
-cp -f build/vm/qcow2/disk.qcow2 "$cache"
+cp -f "$outdir/qcow2/disk.qcow2" "$cache"
 cp -f "$cache" "$out"
+rm -rf "$outdir"
 echo "disk for $role at $out"
