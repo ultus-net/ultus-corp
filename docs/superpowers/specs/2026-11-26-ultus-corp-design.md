@@ -134,8 +134,8 @@ Rules that make the model hold:
 
 1. A scenario declares only the dependencies it needs, never everything for
    safety.
-2. A single scenario stays under five VMs and 10 GiB of RAM. The assembly runs
-   are exempt and are listed separately.
+2. A single scenario uses fewer than five VMs and at most 10 GiB of RAM. The
+   assembly runs are exempt and are listed separately.
 3. `up` and `down` are symmetric. `down` leaves no domain, network, volume or
    generated key, and a second `up` succeeds.
 4. A scenario rebuilds from an empty host in under ten minutes once its role
@@ -143,10 +143,13 @@ Rules that make the model hold:
 5. Each scenario declares the interfaces it exposes and consumes: ports, DNS
    names and certificate purposes. A static check confirms the declarations
    compose.
+6. Generated artifacts have a budget: role images, builder output and base
+   disks share 20 GiB. `lab prune` reclaims them and refuses to remove a file
+   a running domain has open.
 
 | Scenario | VMs | RAM | Proves |
 | --- | --- | --- | --- |
-| s0-base | 1 | 2 GiB | an image builds, boots, upgrades and rolls back |
+| s0-base | 1 | 2 GiB | an image builds, boots and serves a lookup |
 | s1-dns | 2 | 3 GiB | authoritative plus recursive, delegation intact |
 | s2-dhcp | 2 | 3 GiB | relay plus Kea, a lease survives a restart |
 | s3-overlay | 4 | 6 GiB | hub and one branch edge, routes, nftables policy, key rotation, time across the overlay |
@@ -156,7 +159,8 @@ Rules that make the model hold:
 | s7-delivery | 3 | 6 GiB | registry mirror, egress toggle, pull through the hub |
 | s8-observe | 2 | 5 GiB | metrics, logs and a secret rotation without a rebuild |
 | s9-endpoints | 3 | 10 GiB | PXE to an installer, Fleet enrolment, Windows certificate trust |
-| s10-stateful | 3 | 9 GiB | print, file, IPAM, backup and restore |
+| s10-stateful | 4 | 10 GiB | print across a node loss, file, IPAM, backup and restore |
+| s11-update | 2 | 3 GiB | upgrade, health gate, rollback, unsigned image refused |
 
 | Assembly run | VMs | RAM | Proves |
 | --- | --- | --- | --- |
@@ -231,7 +235,7 @@ library, so the renderer needs no dependency at all.
 | D8 | DNS | BIND 9 primary in the DC; Unbound recursive per site; FreeIPA owns `ipa.lab.internal` | LAN resolution survives identity and the WAN being down | FreeIPA as the only DNS; dnsmasq |
 | D9 | DHCP | Kea local to each branch, configured from the DC spec | Leases survive a WAN cut, and the branch stays a self-contained unit | DHCP relayed to the DC; DHCP on the directory |
 | D10 | Edge | One bootc role with `branch` and `hub` profiles: FRR, nftables, WireGuard, DHCP relay | The image thesis covers the network, not only the services | OPNsense appliances; host bridges only |
-| D11 | Provisioning | `bootc-image-builder` qcow2 plus a NoCloud seed ISO | The path `dux-atomic` already proves | Hand-built guests; cloud images |
+| D11 | Provisioning | `image-builder` qcow2 plus a NoCloud seed ISO | The maintained interface, with an explicit blueprint instead of an implicit config path | The legacy `bootc-image-builder` CLI; hand-built guests; cloud images |
 | D12 | Secrets | Generated once into a gitignored `lab-secrets/`; root key offline | Nothing sensitive enters git or an image | Committed keys; secrets baked into images |
 | D13 | Supply chain | cosign keyless per image, SBOM per image, trivy gate | Same gates as `dux-atomic` | Unsigned local builds |
 | D14 | Lab unit | One scenario per component, run and torn down alone | The design is complete while the resident footprint is one bounded component, so it fits hardware on hand and costs nothing | A resident topology; graduated `--profile` sets |
@@ -240,6 +244,12 @@ library, so the renderer needs no dependency at all.
 | D17 | Endpoint management | Fleet for inventory and policy, PXE for Linux and WinPE, macOS by profile | One plane for a mixed fleet, and onboarding from blank | Intune, which needs Entra; client VMs only, which leaves onboarding manual |
 | D18 | 802.1X authenticator | `hostapd` with the wired driver on the users bridge | Gives real supplicants a real authenticator, not just `eapol_test` | `eapol_test` only, which proves the server and nothing else |
 | D19 | Integration evidence | A static interface-composition check plus a dated assembly run | Composition is checked continuously where it can be, and sampled where it cannot | Assuming a green scenario proves the network |
+| D20 | Update health gate | `greenboot` health checks in `/etc/greenboot/check/required.d`, per role | A failed upgrade reboots back to the previous image without a human at 03:00 | Trusting every promoted image |
+| D21 | Host verification | `/etc/containers/policy.json` defaults to reject, with one signed exception for the lab registry | Signing in CI proves nothing unless the host refuses unsigned pulls | Signing without host policy |
+| D22 | Drift control | Config is generated from the spec at boot, and `/etc` is compared against it | `/etc` and `/var` stay writable in image mode, so "immutable" is not the guarantee | Claiming the image alone prevents drift |
+| D23 | Rollout order | Mirror, then DC, then a one-day soak, then branches one at a time | The hub is the only egress, so its mirror is the gate for every branch | Updating every site at once |
+| D24 | Offline artifacts | Container images a role needs are embedded as OCI archives in the image and loaded at boot | A guest with no egress can run before the registry mirror exists | Assuming s7 exists first; opening egress |
+| D25 | Role record | `docs/roles/<role>.md` with mechanism, Windows analogy, where it breaks, and the proving command, gated in CI | The teaching claim becomes a checked artifact | Prose in the README |
 
 ## Target architecture
 
@@ -327,7 +337,7 @@ generated, schema-checked and handed to a real Mac, not booted here.
 | --- | --- | --- | --- |
 | s0 | dns | BIND 9, Unbound | secondary only |
 | s2 | dhcp | Kea, lease store | yes |
-| s3 | edge | FRR, nftables, WireGuard, DHCP relay, `hostapd`; `branch` and `hub` profiles | config only |
+| s2 | edge | FRR, nftables, WireGuard, DHCP relay, `hostapd`; `branch` and `hub` profiles | config only |
 | s3 | ntp | chrony | no |
 | s4 | pki | step-ca | yes, small |
 | s4 | proxy | Caddy, certmonger client | no |
@@ -347,11 +357,27 @@ A role debuts in the scenario that first needs it, and later scenarios reuse the
 same image. The image is the unit of build and test. The scenario is the unit of
 run.
 
+Two contracts keep a role usable before the registry exists, and keep the
+teaching claim checkable.
+
+- **Artifacts travel inside the image.** A role that needs a container image
+  embeds it at build time as an OCI archive under
+  `/usr/share/ultus-corp/images/`, and a boot unit loads it with `podman load`
+  before the workload starts. That is what lets Keycloak, Gitea, Fleet and
+  NetBox come up in a guest with no egress, before `s7-delivery` exists.
+- **Every role carries a record.** `docs/roles/<role>.md` states the Linux
+  mechanism, the closest Windows concept, where the analogy breaks, and the
+  command that proves the mechanism. A static gate fails when a role image has
+  no record or a record is missing a field. This is the Audience rule made
+  executable rather than aspirational.
+
 Each image is `FROM` the pinned `quay.io/centos-bootc/centos-bootc:stream10`
 digest, installs `manifests/packages-common.txt` plus its own manifest, and
 copies `modules/<role>/` onto `/`. A role's build-time steps live under
 `/usr/libexec/ultus-corp/build.d/`, run in name order, and assert their own
-enablement.
+enablement. Build time cannot see the seed, so anything node-specific is
+rendered at boot by `ultus-provision.service`, which reads the seed and writes
+the role config before the service starts.
 
 ## Scenarios and exit criteria
 
@@ -367,9 +393,14 @@ enablement.
 | s7-delivery | Registry mirror, egress toggle, pull-through | A guest pulls an image through the hub with egress off, and egress on only for updates |
 | s8-observe | Prometheus, Loki, Grafana, OpenBao | Every role in the scenario emits metrics and logs, and a secret rotates without a rebuild |
 | s9-endpoints | Fleet, PXE, WinPE, a Windows client, the macOS profile | A blank VM PXE-boots to an installer, Windows trusts the root and completes EAP-TLS, and the macOS profile validates |
-| s10-stateful | Print, file, IPAM | Print survives a node loss, IPAM is the address source of truth, and a backup restores |
+| s10-stateful | Print (two nodes), file, IPAM | Print survives a node loss, IPAM is the address source of truth, and a backup restores |
+| s11-update | Upgrade a two-node scenario, fail a health check on purpose, push an unsigned image | The good image goes green, the bad one rolls back on its own, and the unsigned image is refused |
 | assembly-min | Every role that the minimum topology needs, at once | Hub, branch 1, identity and one client work together, and an OIDC login crosses all of them |
 | assembly-branches | Branches 2 and 3 added as spec entries | Adding branch 3 is one spec entry and one address block, and cutting a branch overlay leaves it resolving, leasing and telling time |
+
+s9 stays at three VMs because the roles are separate, not co-located: `deploy`
+serves iPXE, TFTP and WinPE, `mdm` runs Fleet, and the third node is the Windows
+client. RADIUS and the wired authenticator belong to s6 and are not re-run here.
 
 ## Evolution
 
@@ -390,7 +421,60 @@ The scaling constraint is WireGuard itself: `AllowedIPs` is the routing table.
 In hub-and-spoke a branch needs one peer entry, so the branch config is O(1),
 but the hub is O(N). BGP moves the per-branch route into the protocol. That is
 the step that turns "a flexible number of branches" from a claim into a
-property.
+property. `AllowedIPs` stays the cryptokey routing table either way, so route
+policy and `AllowedIPs` are generated from the same spec entry, and the drift
+test survives the change to BGP.
+
+## Updates and drift
+
+This is the part that makes the lab a DevOps exercise rather than a collection
+of servers. The container build is what enforces IaC, and bootc is what makes
+updates atomic. Neither does the work alone, and the difference matters.
+
+"Atomic" means the whole OS image is replaced in one transaction. It does not
+mean nothing can drift. In image mode `/usr` and the rest of the root outside
+`/etc` and `/var` are read-only. `/etc` and `/var` stay writable, and that is
+exactly where a hand edit lands. So the IaC claim rests on four mechanisms, and
+the container format alone delivers none of them.
+
+| Mechanism | What it enforces | Windows bridge |
+| --- | --- | --- |
+| Pipeline-only images | A host runs what CI built, because nothing else is signed | Software deploys through the package pipeline, not by copying files to `C:\Program Files` |
+| Host signature policy | `bootc upgrade` refuses an image the CI identity did not sign | Like requiring a signed driver, but enforced at the OS pull |
+| No runtime package installs | The image is the only way software arrives | No `msiexec` on a production box |
+| Generated config | `/etc` is written at boot from the rendered spec, so a manual edit is overwritten or reported | Desired State Configuration, but the state is the file the boot wrote |
+
+### Regular updates
+
+Updates are a scheduled event, not an incident. Four rules make the cadence
+safe at three sites.
+
+1. The hub mirror receives the new image first. Branches upgrade from it, never
+   from the internet.
+2. The DC updates, then soaks for a day, then the branches update one at a
+   time. A branch can always be a day behind.
+3. Every role ships `greenboot` checks in `/etc/greenboot/check/required.d`. A
+   failed check reboots back to the previous image. A warning-only check goes in
+   `wanted.d` and does not roll back.
+4. After any signature-policy change, clear a staged deployment. A staged image
+   is finalized without revalidating the policy, and that is CVE-2026-16460.
+
+Two current details decide whether verification works at all:
+
+- bootc honours `/etc/containers/policy.json`, and the upstream default does
+  not require signatures. A signed image plus a permissive host policy is
+  signing theatre.
+- `containers/image` reads legacy `.sig` attachments. cosign v3 writes OCI 1.1
+  referrers by default, so a `cosign verify` can pass while `bootc upgrade`
+  reports no signature. Pin the signer to the format the host policy can read,
+  and prove the negative case with an unsigned image.
+
+| Windows bridge | Linux mechanism |
+| --- | --- |
+| Windows Update, with WSUS rings | Mirror first, DC, soak, then branch rings |
+| System Restore point | `bootc rollback`, whole image, one reboot |
+| Failed-update automatic recovery | `greenboot` required checks and a rollback reboot |
+| Driver signing enforcement | `/etc/containers/policy.json` with a reject default |
 
 ## Reuse in a real rebuild
 
@@ -452,16 +536,25 @@ docs/                           design, plans, runbooks
    media committed.
 2. Build: each role image builds in a CI matrix.
 3. Image: `bootc container lint`, role units enabled, package lock matches.
-4. Scenario: `lab up <scenario>` boots it and its own test passes.
+4. Scenario: `lab up <scenario>` boots it and its own test passes, with each
+   assertion recording the command, the expected value and the observed value
+   in `run/evidence/<scenario>.log`. A green line without an observation is not
+   evidence.
 5. Teardown: `lab down <scenario>` leaves no domain, network, volume or
-   generated key, and a second `up` of the same scenario succeeds.
+   generated key, and a second `up` of the same scenario succeeds. A cleanup
+   that cannot finish keeps its state file and fails loudly for human review.
 6. Interface: every cross-scenario dependency is declared, and the static check
    confirms the declarations compose.
 7. Assembly: the add-a-branch and branch-survival tests, run as
    `assembly-branches` and recorded with a date.
 8. Supply chain: trivy, SBOM, cosign keyless.
-9. Isolation: a test asserts no libvirt network forwards to the host LAN and
-   that the lab ranges do not overlap the host's.
+9. Isolation: a test asserts every rendered network is `isolated`, has no DHCP
+   and no libvirt DNS, and that lab ranges do not overlap the host's uplink.
+   The check runs on rendered definitions before boot, plus a leaking fixture.
+10. Update: s11 proves a green upgrade, an automatic rollback on a failed
+    health check, and a refused unsigned image.
+11. Role record: every role image has `docs/roles/<role>.md` with all four
+    fields, and the proving command in it exits zero in the role image.
 
 ## Secrets and trust
 
@@ -483,7 +576,7 @@ The builder check raised ten questions. All now have a call.
 | --- | --- |
 | Build connectivity | The build host and CI have internet; the lab guests do not. CI is GitHub Actions with keyless OIDC, as in `dux-atomic`. |
 | Image signing and SBOM | GitHub Actions keyless OIDC, one signature and one SBOM per role image. |
-| Artifact distribution | Images to GHCR by digest. The DC runs a pull-through mirror; the host builds a qcow2 with `bootc-image-builder`; no registry runs inside a branch. |
+| Artifact distribution | Images to GHCR by digest. The DC runs a pull-through mirror; the host builds a qcow2 with `image-builder build --bootc-ref`; no registry runs inside a branch. |
 | Runtime egress | Deny by default. The DC hub is the only egress, and `lab egress on` enables it for updates. |
 | Root CA storage | Encrypted with age in `lab-secrets/`, excluded from git, with the passphrase kept offline. Root generation is a one-time operator script. CI generates a throwaway root per run. |
 | Bootstrap automation | Everything except the operator's root CA, the FreeIPA admin password and the Windows image are automated. All three are runbook steps. |
@@ -499,23 +592,42 @@ bug.
 
 | Fact | Value | Source |
 | --- | --- | --- |
-| Base image | `quay.io/centos-bootc/centos-bootc:stream10@sha256:0df2ed8f…`, multi-arch, cosign-signed | Quay tag API, build of 2026-11-13 |
+| Base image | `quay.io/centos-bootc/centos-bootc:stream10@sha256:0df2ed8f…`, multi-arch, digest-pinned. Signature not verified here; the repin workflow owns that check | Quay tag API, build of 2026-11-13 |
 | Stream 10 lifecycle | maintained until 2030-05-31 | centos.org release notes |
 | Modularity | removed in EL10. No modular content ships, so FreeIPA is a plain package | RHEL 10 considerations, software management |
 | FreeIPA | `ipa-server-dns 4.13.4-1.el10`, AppStream | Stream 10 package index |
-| Kea | `kea 2.6.3-1.el10`, BaseOS | mirror.stream.centos.org |
+| Kea | `kea 3.0.3-1.el10`, BaseOS | mirror.stream.centos.org package index, read 2026-11-26 |
 | FRR | `frr 10.6.1-3.el10`, AppStream | Stream 10 package index |
 | FreeRADIUS | `freeradius 3.2.8-2.el10`, AppStream | Stream 10 package index |
-| hostapd | `hostapd 2.11-2.el10`, AppStream, with a documented wired authenticator procedure | RHEL 10 configuring and managing networking, ch. 20 |
+| hostapd | `hostapd 2.11-2.el10`, AppStream, with a documented wired authenticator procedure | RHEL 10 configuring and managing networking, "Setting up an 802.1X network authentication service for LAN clients" |
 | 802.1X recipe | Red Hat documents hostapd plus FreeRADIUS with EAP-TTLS and LDAP inner auth. EAP-TLS works but is not the vendor default | same chapter |
-| Image to disk | `bootc-image-builder` emits qcow2. Config lives under `/usr/lib/image-builder/bootc`, and the older path is legacy | osbuild docs, RHEL 10 image mode ch. 6 |
+| Image to disk | Image Builder supersedes bootc-image-builder: `image-builder build --blueprint … --bootc-ref … qcow2`, containerised as `ghcr.io/osbuild/image-builder-cli` | osbuild migration guide, read 2026-11-26 |
+| Update health gate | `/etc/greenboot/check/required.d` failure triggers a rollback, `wanted.d` only logs | Red Hat greenboot rollback guide |
+| greenboot in Stream 10 | `greenboot 0.16.5-0.el10` in AppStream | mirror.stream.centos.org package index, read 2026-11-26 |
+| Python on the host | the renderer needs 3.11 or newer for `tomllib`. Stream 10 guests ship 3.12, the host is checked separately | Python 3.12 docs, RHEL 10 language versions |
+| Signature enforcement | bootc honours `/etc/containers/policy.json`, and the upstream default does not require signatures | bootc security man page |
+| Signature format | `containers/image` reads legacy `.sig` attachments, and cosign v3 writes OCI referrers by default | containers/image and cosign migration reports, 2026 |
+| Staged content | A staged deployment is finalized without revalidating the policy: CVE-2026-16460 | Red Hat CVE page, October 2026 |
+| Writable config | `/etc` and `/var` stay writable in image mode, so drift remains possible | Red Hat image mode material |
 
-Two consequences, both already reflected in the plan:
+Three consequences, all already reflected in the plan:
 
 - EAP-TLS stays the target, because it is what this lab is for. The documented
   EAP-TTLS plus LDAP recipe is the fallback if a Windows supplicant refuses,
   and s6 owns that decision.
 - The builder config goes to the current path, not the legacy one.
+- `greenboot` joins the common package manifest from the first image, so every
+  later role inherits the health-check hook instead of retrofitting it.
+- The disk build uses `image-builder build` with an explicit blueprint. The
+  legacy `bootc-image-builder` flags are not used, even where a host still has
+  that binary.
+
+The upstream base signature is the one fact this document does not settle. The
+digest resolves and the tag is signed in some form, but no cosign verification
+of the exact index was run here. `repin-base.yml` therefore must verify with an
+exact expected issuer and identity before it accepts a digest, and it must fail
+closed when the signer cannot be identified. s11 proves the negative case with
+an unsigned lab image.
 
 ## Risks
 
@@ -536,6 +648,8 @@ Two consequences, both already reflected in the plan:
 | FreeIPA and BIND fight over a zone | Duplicate or missing records | FreeIPA owns `ipa.lab.internal`; BIND delegates it |
 | FreeIPA install needs working DNS and clock | A failed install on first boot | Order s1 before s5, and assert clock and forwarders |
 | Package gaps in Stream 10 | Roles do not resolve | EPEL 10 and vendor repositories, confirmed per role before s5 |
+| A bad image reaches every branch | Three sites break at once | The greenboot gate, a DC soak first, branches one at a time, and a branch allowed to hold a day behind |
+| The signer format and the host policy disagree | `cosign verify` passes while `bootc upgrade` refuses or accepts wrongly | Prove both directions in s11 with an unsigned image and a policy-shaped image |
 | A libvirt network bridges to the home LAN | The lab leaks DHCP or DNS | The isolation gate fails the build |
 
 ## Open questions
