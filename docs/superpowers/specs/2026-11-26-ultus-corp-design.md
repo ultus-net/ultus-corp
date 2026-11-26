@@ -240,39 +240,55 @@ library, so the renderer needs no dependency at all.
 | D17 | Endpoint management | Fleet for inventory and policy, PXE for Linux and WinPE, macOS by profile | One plane for a mixed fleet, and onboarding from blank | Intune, which needs Entra; client VMs only, which leaves onboarding manual |
 | D18 | 802.1X authenticator | `hostapd` with the wired driver on the users bridge | Gives real supplicants a real authenticator, not just `eapol_test` | `eapol_test` only, which proves the server and nothing else |
 | D19 | Integration evidence | A static interface-composition check plus a dated assembly run | Composition is checked continuously where it can be, and sampled where it cannot | Assuming a green scenario proves the network |
-| D20 | Rollback contract | The OS rolls back; a stateful role restores. Stateless and config-only roles roll back by deployment; the 12 stateful roles are forward-only with a pre-upgrade snapshot and a restore test | `/var` persists across deployments, and NetBox and Keycloak do not support a schema downgrade. Older binaries against newer data is an outage, not a rollback | Treating `bootc rollback` as a data rollback |
-| D21 | Update plane | One update plane. The image pins every Quadlet container by digest, no unit sets `AutoUpdate=registry`, and the auto-update timer is masked | A second update plane makes "the image is the unit of build and test" false for the roles that use Quadlet | Independent container auto-update |
+| D20 | Rollback contract | A per-role restore procedure, recorded in the role's runbook and exercised by its scenario. Stateless roles redeploy the previous image; config-only roles redeploy the previous image and seed; stateful roles are forward-only with a quiesced, application-consistent backup and a restore into a matching image | `/var` persists across deployments, and database schemas are not reliably reversible. A filesystem snapshot is not an application-consistent backup, and older binaries against newer data is an outage, not a rollback | Treating `bootc rollback` as a data rollback; one generic snapshot rule for every role |
+| D21 | Update plane | Quadlet containers are declared as bootc logically bound images under `/usr/lib/bootc/bound-images.d` and pinned by digest. No unit sets `AutoUpdate=registry`, and the auto-update timer is masked | A floating container in `/var/lib/containers` is outside the image digest, rollback, offline boot and SBOM. A bound image follows the bootc deployment and is present before the network is up | Independent container auto-update; an implicit second artifact plane |
 
 ## Configuration and deployment inputs
 
 Configuration is a versioned artifact. The repository holds the templates, the
-value schema and the non-secret values. The image holds what every host of a
-role shares. Deployment supplies what differs per host, exactly once. Nothing
-converges host state after deployment.
+value schema, the non-secret values and the tests. The image holds what every
+host of a role shares. The `lab` renderer turns `lab/lab.toml` into per-host
+configuration at deployment. Nothing converges host state after deployment.
 
 | Layer | Owns | Home | Changes on |
 | --- | --- | --- | --- |
 | Source | templates, value schema, non-secret values, manifests, tests | this repository | a reviewed commit |
-| Image | packages, `/usr`, static config, units, container digests | the image digest | a build |
-| Deployment | hostname, addresses, keys, site values | `/etc` and the NoCloud seed | host creation or re-creation |
+| Image | packages, `/usr`, static config, units, bound container digests | the image digest | a build |
+| Deployment | identity and per-site service values, rendered | the NoCloud seed, written to `/etc` and `/var` | host creation or re-creation |
 | Runtime | users, DNS records, realms, reservations | the service API | an operator decision |
 
 Rules:
 
 1. A change that would make two hosts from the same digest differ in `/usr`
    belongs in the image.
-2. A per-instance value is declared in `lab/lab.toml` or `lab-secrets/`,
-   rendered once, and never edited on the host.
-3. The seed carries identity only: hostname, network, keys and an enrolment
-   token. It carries no package installs and no service configuration.
-   `cloud-init` uses once-per-instance modules only; `always` modules are
-   banned.
-4. A role that needs a first-boot install ships an idempotent, fail-closed
-   oneshot unit. The unit writes `/etc` and `/var`; the image supplies the
-   package. FreeIPA, step-ca, OpenBao and Fleet are in this class.
-5. Nothing re-applies configuration on a running host. A drifted host is
-   re-rendered from the repository or replaced.
-6. Runtime automation may change API objects only, never host files.
+2. A per-instance value is declared in `lab/lab.toml` or `lab-secrets/`. The
+   `lab` renderer turns it into a file at deployment. The guest never templates
+   it, and an operator never edits it on the host.
+3. The seed carries deployment inputs only: identity, the rendered per-role
+   configuration, and the secret material a role needs at first boot. It carries
+   no packages and no build steps.
+4. `cloud-init` runs once per instance. The seed is mode 0600, is never logged,
+   and is deleted after the first successful boot. Material that must persist,
+   such as a host key, is written only to its `0600` file.
+5. A role that needs a first-boot install ships an idempotent, fail-closed
+   oneshot unit. That install may write `/etc` and `/var` and enable units.
+   Deployment ends when `cloud-init` and the role's installer both report
+   success; before that the host is not in service.
+6. After deployment ends, nothing mutates host files. Runtime automation may
+   change API objects only.
+7. A drifted host is re-rendered from the repository or replaced, not repaired.
+
+## Rollback and upgrade
+
+A stateful role never rolls back by image alone. Its runbook names the quiesce
+step, the backup method, the restore order and the image it restores into.
+
+| Class | Roles | Rollback |
+| --- | --- | --- |
+| Stateless | edge, ntp, proxy, radius | `bootc rollback` to the previous image |
+| Config-only | dns (secondary) | previous image plus the previous seed |
+| Application state | dhcp, pki, ipa, app, registry, mon, secrets, mdm, ipam | quiesce writes, back up with the application's tool, restore into the matching image |
+| File-backed | deploy, print, file | quiesce, back up the share, restore into the matching image |
 
 ## Target architecture
 
@@ -496,12 +512,17 @@ docs/                           design, plans, runbooks
 8. Supply chain: trivy, SBOM, cosign keyless.
 9. Isolation: a test asserts no libvirt network forwards to the host LAN and
    that the lab ranges do not overlap the host's.
-10. Drift: every scenario asserts `bootc status --json` reports the expected
-    digest and `ostree admin config-diff` is empty for managed paths.
-11. Idempotence: a second boot of the same deployment applies nothing and
-    leaves the digest unchanged.
-12. Rollback: a stateless role returns to the previous deployment, and a
-    stateful role restores from its pre-upgrade snapshot.
+10. Managed files: each scenario records a checksum manifest of every file the
+    deployment renders, asserts the manifest is unchanged after a second boot,
+    and fails when a negative test hand-edits one managed file.
+11. Deployment: `cloud-init` and each role oneshot report exactly one successful
+    run after two boots, and the seed ISO is gone after the first success.
+12. Rollback: one role from each class in `§Rollback and upgrade` is exercised.
+    A stateless role returns to the previous image, a config-only role to the
+    previous image and seed, and a stateful role restores its backup into the
+    matching image.
+13. Reproducibility: the build consumes a lock of resolved NEVRA versions, and a
+    package transaction outside the lock fails the build.
 
 ## Secrets and trust
 
@@ -568,7 +589,9 @@ Two consequences, both already reflected in the plan:
 | Integration evidence is sampled | A cross-component breakage survives a green scenario | The interface-composition gate plus a dated assembly run |
 | The third branch never runs | A three-branch interaction is never observed | `assembly-branches` proves two branches plus the hub, and the third stays spec-tested and documented |
 | Teardown leaks state | A stale network or volume breaks the next scenario | The teardown gate, which re-runs `up` after `down` |
-| Stateful rollback runs older binaries | A rollback boots a previous image against data written by the newer one | D20: the 12 stateful roles are forward-only, with a snapshot and a restore test |
+| Stateful rollback runs older binaries | A rollback boots a previous image against data written by the newer one | D20: the 12 stateful roles are forward-only, with a quiesced backup and a restore into the matching image |
+| The seed ISO carries secrets | A retained ISO exposes keys and an enrolment token | Mode 0600, never logged, deleted after the first successful boot; the teardown gate asserts absence |
+| Mutable Stream repositories | Two builds of the same image install different NEVRAs | A resolved NEVRA lock is consumed by the build; gate 13 |
 | libvirt tooling absent | s0 cannot start | Install libvirt, `virt-install` and a seed ISO tool, then prove one guest boots |
 | `hostapd` wired driver is unproven here | Real supplicants cannot complete 802.1X | Verify it in s6 before the endpoint gate; `eapol_test` remains the server proof |
 | EAP-TLS is not the vendor recipe | A Windows supplicant may fail where EAP-TTLS would pass | s6 proves EAP-TLS with a real supplicant, and EAP-TTLS plus LDAP is the documented fallback |
