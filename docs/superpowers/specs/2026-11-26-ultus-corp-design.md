@@ -1,0 +1,570 @@
+# ultus-corp: a reference corporate network lab
+
+**Status:** draft for approval, 2026-11-26
+**Scope:** a three-branch company with a data-centre hub, built from CentOS
+Stream 10 bootc images and run as libvirt VMs. It starts with stateless
+services, then adds the directory, the IdP, endpoint management and the stateful
+roles a corporate network actually needs. Every component is designed and tested
+as its own bounded scenario, and the full topology is never resident.
+**Relationship:** independent of `infra-overhaul`. It may later supply images,
+patterns and evidence to that project. It inherits no client data, addresses,
+secrets or vendor contracts.
+
+## Intent
+
+This is a personal reference design: a lab that is free to be wrong, cheap to
+rebuild from nothing, and realistic enough that its failures teach something
+about a real corporate network. It answers a question the client estate cannot
+answer safely: what does a fresh corporate network look like when every server
+is an image and every role is code?
+
+It is a modular, containerised reference network. Every host is a bootable
+container image, and every service inside it is either a container or a
+packaged daemon. That is what makes the network modular: a role is replaced by
+changing an image reference, not by logging in and editing files.
+
+## Audience
+
+Written for a DevOps engineer coming from a Windows background who is
+strengthening Linux system design. Two consequences run through the whole
+document.
+
+- Every role names the Linux mechanism it depends on, and the Windows
+  equivalent the reader already knows, where one exists. DNS as a service is
+  the same idea. `systemd` units, SELinux labels, `nftables` and `bootc` are
+  not, and each gets a one-line bridge to its Windows counterpart.
+
+- The lab is judged on whether it teaches the mechanism, not on whether it
+  runs. A green test that hides why it passed is a failure here.
+
+The shape is a central control plane and a local data plane. The data centre
+owns identity, policy, configuration, endpoint management and the artifact
+registry. Each branch runs its own DNS, DHCP, NTP and proxy so the LAN survives
+a WAN loss. A WireGuard overlay is only the transport between them, and a new
+branch is one spec entry and one address block, never a code change.
+
+The design is complete. The lab is not. Every component below is also a
+scenario: a bounded set of VMs, a spec entry, a test and a measured footprint.
+The host runs one scenario at a time and tears it down, so the whole design is
+covered without ever running the whole topology. Whole-topology runs are rare
+assembly checks with a dated evidence file, not the normal mode.
+
+## Goals
+
+- One tree, one image per role, each built, scanned, signed and booted from the
+  pipeline.
+- One scenario per component, each one booted, tested and torn down in
+  isolation, with its footprint measured and recorded.
+- Components that carry to a real rebuild: image, config template and test
+  travel; the trust root, names and keys are reissued.
+- Three branches plus a data-centre hub, connected hub-and-spoke, that exercises
+  DHCP relay, split-horizon DNS, cross-branch routing and an active/active pair.
+- A branch that keeps resolving, leasing and telling time when its overlay link
+  is cut.
+- A real identity stack: FreeIPA as the source of truth, Keycloak federated to
+  it, FreeRADIUS using FreeIPA-issued certificates.
+- Endpoint onboarding end to end: PXE to an installer, certificate trust,
+  802.1X and app SSO, driven from one management plane.
+- Every scenario rebuildable from the repository, from an empty host.
+- Fully isolated: its own address plan and trust root, no route into the real
+  estate or the personal tailnet.
+- Publishable: no client name, no real address, no secret, no exported zone.
+
+## Non-goals
+
+- A resident full topology. The diagram is the target. The lab reaches it in
+  scenarios and occasional assembly runs.
+- Production availability. There is no shared storage, no cluster SLA and no
+  on-call obligation.
+- A full device fleet. One runnable client per OS is the ceiling the isolation
+  allows; macOS is documented, because it cannot be virtualised on this host.
+- Running Entra or Intune. They cannot run in an isolated lab; their shape is
+  mapped to Keycloak and Fleet.
+- Windows Autopilot. It needs Entra and the internet. PXE to WinPE is the lab
+  path.
+- A real cloud VPC. The cloud farm is a fourth site on the same hypervisor, and
+  the hub role is written so it can move later.
+- Performance benchmarking. VM sizing is enough to run the roles, not to
+  measure them.
+- Migrating anything from the Windows estate. This is greenfield.
+
+## Anti-goals
+
+A change counts as a failure, even if it works, when it:
+
+- puts a secret, a private key or an exported zone in git;
+- puts a private key or a shared secret inside an image;
+- commits a Microsoft or Apple installation image;
+- hand-configures a VM that is not described by the checked-in spec;
+- leaves a service that cannot be rebuilt from the repository;
+- routes the lab into the real estate or the personal tailnet;
+- issues a service certificate from a public CA;
+- reuses the lab address plan on a real network;
+- lets a component become permanent without a decision to keep it.
+
+## Constraints
+
+- The lab host is this workstation, chosen 2026-11-26. Measured: 12 threads,
+  30 GiB RAM, 56 GiB free disk, one 1 GbE NIC and one idle Wi-Fi NIC. libvirt,
+  `virt-install` and `cloud-localds` are not installed yet.
+- Zero cloud spend. Every scenario runs on hardware on hand, so no scenario may
+  depend on a rented host or a SaaS trial.
+- The host is shared with daily work. A scenario may not need the desktop
+  stopped. Only an assembly run may.
+- The base is CentOS Stream 10 image mode, built with bootc. No Fedora, Ubuntu
+  or Debian guest.
+- The lab guests have no internet by default. The build host and CI do. The DC
+  hub is the only runtime egress, and it is a toggle.
+- macOS cannot be virtualised on non-Apple hardware. A macOS client is a
+  generated configuration profile that a real Mac installs, never a VM.
+- Full MDM enrolment of Apple devices needs APNs and an Apple ID, and Windows
+  Autopilot needs Entra. Both are documented variants, not the default path.
+- Windows and macOS installation media are downloaded by the operator and
+  never committed.
+- Every credential is generated once and kept outside the repository.
+- The repository is public, MIT licensed, and generic.
+
+## Scenario model
+
+A scenario is the unit of work: an id, the spec entries it needs, its declared
+dependencies, its test, its peak footprint and its teardown. `lab up s3-overlay`
+runs one scenario. `lab down s3-overlay` returns the host to where it started.
+
+Rules that make the model hold:
+
+1. A scenario declares only the dependencies it needs, never everything for
+   safety.
+2. A single scenario stays under five VMs and 10 GiB of RAM. The assembly runs
+   are exempt and are listed separately.
+3. `up` and `down` are symmetric. `down` leaves no domain, network, volume or
+   generated key, and a second `up` succeeds.
+4. A scenario rebuilds from an empty host in under ten minutes once its role
+   images exist in the registry mirror.
+5. Each scenario declares the interfaces it exposes and consumes: ports, DNS
+   names and certificate purposes. A static check confirms the declarations
+   compose.
+
+| Scenario | VMs | RAM | Proves |
+| --- | --- | --- | --- |
+| s0-base | 1 | 2 GiB | an image builds, boots, upgrades and rolls back |
+| s1-dns | 2 | 3 GiB | authoritative plus recursive, delegation intact |
+| s2-dhcp | 2 | 3 GiB | relay plus Kea, a lease survives a restart |
+| s3-overlay | 4 | 6 GiB | hub and one branch edge, routes, nftables policy, key rotation, time across the overlay |
+| s4-pki | 2 | 3 GiB | root to intermediate to ACME leaf, trust without copying |
+| s5-identity | 4 | 9 GiB | FreeIPA, Keycloak federation, one OIDC app |
+| s6-radius | 3 | 5 GiB | FreeRADIUS, a real authenticator, EAP-TLS from a real supplicant |
+| s7-delivery | 3 | 6 GiB | registry mirror, egress toggle, pull through the hub |
+| s8-observe | 2 | 5 GiB | metrics, logs and a secret rotation without a rebuild |
+| s9-endpoints | 3 | 10 GiB | PXE to an installer, Fleet enrolment, Windows certificate trust |
+| s10-stateful | 3 | 9 GiB | print, file, IPAM, backup and restore |
+
+| Assembly run | VMs | RAM | Proves |
+| --- | --- | --- | --- |
+| assembly-min | 9 | 12 GiB | hub, branch 1, identity and one client, at the same time |
+| assembly-branches | 13 | 16 GiB | add-a-branch and branch survival, across two branches |
+| full | 26 | 30 GiB | the whole diagram, documented and never run on this host |
+
+Peak for any single scenario is 10 GiB. The host has about 18 GiB free with the
+desktop running, so every scenario fits as normal work. Both assembly runs need
+the desktop stopped. The full three-branch diagram needs the whole host and
+still does not fit, and the design says so rather than scheduling a run that
+cannot happen.
+
+What the model costs: integration evidence is sampled, not continuous. Two
+gates cover the gap. One is the static interface check. The other is the
+assembly runs, which produce a dated evidence file. Neither pretends that a
+green scenario proves the whole network.
+
+## Approaches considered
+
+### Overlay (chosen: hub-and-spoke, with a documented path to more)
+
+| Approach | What you get | Why not |
+| --- | --- | --- |
+| **A. Hub-and-spoke** | Branches peer only with the DC hub. Three tunnels, one policy point, one key set per branch, and the branch config stays O(1) as branches are added. | Chosen. Branch-to-branch traffic hairpins through the DC. |
+| B. Full mesh | Direct branch-to-branch paths. | Six tunnels at this size, more as branches grow, and every branch becomes a routing peer. |
+| C. Hub now, direct paths later | Start hub-only, add policy-driven direct paths as their own evolution stage. | This is the evolution path, recorded below, not a separate build. |
+
+### Identity (chosen: one authority, federated)
+
+| Approach | What you get | Why not |
+| --- | --- | --- |
+| **A. FreeIPA source of truth, Keycloak federated** | One user store, Kerberos, CA, host policy; OIDC for apps; EAP-TLS for 802.1X. The AD plus Entra shape. | Chosen. Keycloak cannot create users, which is the realistic constraint. |
+| B. Two authorities, switchable | Both native patterns side by side. | Two stores drift, and every service carries two configs. |
+| C. Directory only | Smallest identity build. | Never exercises OIDC/SSO, which is most of a modern corporate network. |
+
+### Endpoints (chosen: Fleet plus PXE, with the isolation ceiling)
+
+| Approach | What you get | Why not |
+| --- | --- | --- |
+| **A. Fleet for inventory and policy, PXE for installs** | One management plane for Linux and Windows, osquery visibility, and onboarding from a blank VM. | Chosen. Windows MDM enrolment needs verification, and Apple is documented. |
+| B. Client VMs only, no management plane | Cert trust, 802.1X and SSO tested per OS. | Onboarding is hand-run, which is the thing a corporate network never does. |
+| C. A real Intune tenant | The production shape. | Needs Entra, the internet, and a licence, which breaks isolation and the public repo. |
+
+### Platform (chosen: libvirt with a checked-in spec)
+
+Proxmox needs a cluster the lab does not have. OpenTofu's libvirt provider is
+rough enough that the provisioning surface would become the project. A TOML VM
+spec plus a renderer is still IaC, and it rebuilds deterministically. TOML over
+YAML because Python 3.11 and later read it with `tomllib` from the standard
+library, so the renderer needs no dependency at all.
+
+### Lab execution (chosen: one scenario at a time)
+
+| Approach | What you get | Why not |
+| --- | --- | --- |
+| **A. One scenario per component** | The whole design is covered. Only one bounded component is resident, so it fits shared hardware and costs nothing. | Chosen. Integration is proven by a static check and a rare assembly run. |
+| B. Resident topology, graded profiles | Continuous integration evidence, one `lab up` for the whole network. | Needs 18 to 41 GiB resident and a dedicated host. The host is also the daily driver. |
+| C. Cloud lab per run | Unlimited size and full isolation per run. | A recurring bill, and the hardware on hand goes unused. |
+
+## Decisions
+
+| # | Decision | Choice | Why | Rejected |
+| --- | --- | --- | --- | --- |
+| D1 | Base | CentOS Stream 10 image mode, bootc, Podman Quadlet | EL parity, roughly five-year support, atomic upgrade and rollback | Fedora, which moves every six months; Ubuntu and Debian, which have no atomic rollback |
+| D2 | Repository | Fresh tree, one `Containerfile.<role>` per role | The role pattern is proven in `dux-atomic`; the Fedora pin and desktop half are not | Forking `dux-atomic` |
+| D3 | Topology | Three branches plus a DC hub, hub-and-spoke WireGuard | The smallest shape that shows central control with local survival | Two sites, which cannot show a flexible branch count; full mesh now |
+| D4 | Platform | libvirt/KVM, TOML spec, `lab` renderer | Deterministic, cheap to rebuild, and parseable with the Python standard library | OpenTofu/libvirt first; Proxmox; a YAML spec with a parser dependency |
+| D5 | Isolation | Dedicated libvirt networks, no forward to the host LAN, own address plan | Safe to publish and safe to break | Bridging to the home LAN; tailnet reachability |
+| D6 | Identity | FreeIPA source of truth; Keycloak federates over LDAP; FreeRADIUS uses FreeIPA certs | One authority, AD plus Entra shape | Two stores; directory only |
+| D7 | PKI | One offline lab root, two intermediates: step-ca for service TLS, FreeIPA CA for identity | Avoids a chicken-and-egg between TLS and identity, and shows a real hierarchy | One CA for everything; a public CA |
+| D8 | DNS | BIND 9 primary in the DC; Unbound recursive per site; FreeIPA owns `ipa.lab.internal` | LAN resolution survives identity and the WAN being down | FreeIPA as the only DNS; dnsmasq |
+| D9 | DHCP | Kea local to each branch, configured from the DC spec | Leases survive a WAN cut, and the branch stays a self-contained unit | DHCP relayed to the DC; DHCP on the directory |
+| D10 | Edge | One bootc role with `branch` and `hub` profiles: FRR, nftables, WireGuard, DHCP relay | The image thesis covers the network, not only the services | OPNsense appliances; host bridges only |
+| D11 | Provisioning | `bootc-image-builder` qcow2 plus a NoCloud seed ISO | The path `dux-atomic` already proves | Hand-built guests; cloud images |
+| D12 | Secrets | Generated once into a gitignored `lab-secrets/`; root key offline | Nothing sensitive enters git or an image | Committed keys; secrets baked into images |
+| D13 | Supply chain | cosign keyless per image, SBOM per image, trivy gate | Same gates as `dux-atomic` | Unsigned local builds |
+| D14 | Lab unit | One scenario per component, run and torn down alone | The design is complete while the resident footprint is one bounded component, so it fits hardware on hand and costs nothing | A resident topology; graduated `--profile` sets |
+| D15 | Licence and visibility | Public, MIT, generic | A reference design should be readable | Private; AGPL |
+| D16 | Overlay growth | BGP over the tunnels is the first scaling step, then direct paths, then a second hub | FRR already ships in the edge image, so growth is config, not a redesign | Hand-editing a full mesh |
+| D17 | Endpoint management | Fleet for inventory and policy, PXE for Linux and WinPE, macOS by profile | One plane for a mixed fleet, and onboarding from blank | Intune, which needs Entra; client VMs only, which leaves onboarding manual |
+| D18 | 802.1X authenticator | `hostapd` with the wired driver on the users bridge | Gives real supplicants a real authenticator, not just `eapol_test` | `eapol_test` only, which proves the server and nothing else |
+| D19 | Integration evidence | A static interface-composition check plus a dated assembly run | Composition is checked continuously where it can be, and sampled where it cannot | Assuming a green scenario proves the network |
+
+## Target architecture
+
+```mermaid
+flowchart TB
+  subgraph dc["DC / cloud farm, 10.100.0.0/16"]
+    HUB[hub-gw]
+    ID["FreeIPA<br/>Keycloak"]
+    REG[registry mirror]
+    MON[monitoring]
+    AUX["git, secrets<br/>Fleet, PXE"]
+  end
+  subgraph b1["Branch 1, 10.11.0.0/16"]
+    E1[edge-1]
+    L1["DNS, DHCP, NTP, proxy"]
+    C1["Linux + Windows clients"]
+  end
+  subgraph b2["Branch 2, 10.12.0.0/16"]
+    E2[edge-2]
+    L2["DNS, DHCP, NTP, proxy"]
+  end
+  subgraph b3["Branch 3, 10.13.0.0/16"]
+    E3[edge-3]
+    L3["DNS, DHCP, NTP, proxy"]
+  end
+  E1 == overlay ==> HUB
+  E2 == overlay ==> HUB
+  E3 == overlay ==> HUB
+  HUB --- ID
+  HUB --- REG
+  HUB --- MON
+  HUB --- AUX
+  C1 -->|PXE and MDM| AUX
+```
+
+## Addressing and naming
+
+| Site | Prefix | Segments |
+| --- | --- | --- |
+| DC | 10.100.0.0/16 | mgmt .10, srv .20, dmz .30 |
+| Branch 1 | 10.11.0.0/16 | mgmt .10, usr .20, prt .30, guest .40, srv .50 |
+| Branch 2 | 10.12.0.0/16 | mgmt .10, usr .20, prt .30, guest .40, srv .50 |
+| Branch 3 | 10.13.0.0/16 | mgmt .10, usr .20, prt .30, guest .40, srv .50 |
+
+- Overlay: `10.255.0.0/16`. Hub `.0.1`, branch *n* `.n.1`.
+- AS 65000 at the hub, 65001 to 65003 at the branches.
+- Realm `LAB.INTERNAL`. Zone `lab.internal`, delegated `ipa.lab.internal`.
+- Hostnames carry the site: `dns-br1.lab.internal`, `hub-dc.lab.internal`.
+- The overlay space is separate from every site prefix, so a leaked route is
+  obvious.
+
+## Service placement
+
+| Service | DC | Branch | Why |
+| --- | --- | --- | --- |
+| FreeIPA, Keycloak | yes | no | one authority |
+| step-ca | yes | no | one service root |
+| Fleet, PXE | yes | relay only | one onboarding plane |
+| Authoritative DNS | primary | no | central source of truth |
+| Recursive DNS | yes | yes | resolution survives a WAN cut |
+| DHCP | no | yes | leases survive a WAN cut |
+| NTP | yes | yes | local clock |
+| Proxy cache | yes | yes | local TLS termination |
+| Registry mirror | yes | pull only | the hub is the only egress |
+| Monitoring, git, secrets | yes | agent only | central |
+| Print, file, IPAM | yes | no | central, and stateful |
+
+## Endpoint coverage
+
+| Capability | Linux | Windows | macOS |
+| --- | --- | --- | --- |
+| PXE install | iPXE and kickstart | iPXE, wimboot and WinPE | none, documented |
+| Directory | FreeIPA client | none, local account plus OIDC | none, local account plus OIDC |
+| Management | Fleet agent | Fleet agent, manual enrolment to verify | profile only, needs APNs |
+| Certificate trust | `update-ca-trust` | script or profile | `.mobileconfig` |
+| 802.1X | wpa_supplicant | native supplicant | native profile |
+| App SSO | OIDC | OIDC | OIDC |
+
+macOS is the documented column. It cannot run on this host, so its profile is
+generated, schema-checked and handed to a real Mac, not booted here.
+
+## Roles and images
+
+| Debuts in | Role | Image | Stateful? |
+| --- | --- | --- | --- |
+| s0 | dns | BIND 9, Unbound | secondary only |
+| s2 | dhcp | Kea, lease store | yes |
+| s3 | edge | FRR, nftables, WireGuard, DHCP relay, `hostapd`; `branch` and `hub` profiles | config only |
+| s3 | ntp | chrony | no |
+| s4 | pki | step-ca | yes, small |
+| s4 | proxy | Caddy, certmonger client | no |
+| s5 | ipa | FreeIPA server and replicas | yes |
+| s5 | app | Quadlet: Keycloak, Gitea | yes |
+| s6 | radius | FreeRADIUS, EAP-TLS | config only |
+| s7 | registry | pull-through cache and mirror | yes |
+| s8 | mon | Prometheus, Loki, Grafana | yes |
+| s8 | secrets | OpenBao | yes |
+| s9 | mdm | Fleet, MySQL | yes |
+| s9 | deploy | iPXE, TFTP, HTTP, WinPE | yes, small |
+| s10 | print | CUPS | yes |
+| s10 | file | Samba | yes |
+| s10 | ipam | NetBox | yes |
+
+A role debuts in the scenario that first needs it, and later scenarios reuse the
+same image. The image is the unit of build and test. The scenario is the unit of
+run.
+
+Each image is `FROM` the pinned `quay.io/centos-bootc/centos-bootc:stream10`
+digest, installs `manifests/packages-common.txt` plus its own manifest, and
+copies `modules/<role>/` onto `/`. A role's build-time steps live under
+`/usr/libexec/ultus-corp/build.d/`, run in name order, and assert their own
+enablement.
+
+## Scenarios and exit criteria
+
+| Scenario | Work | Exit |
+| --- | --- | --- |
+| s0-base | Repo skeleton, CI, one `dns` role, one VM | A lookup answers, then `lab down s0-base` leaves no domain, network or volume |
+| s1-dns | Authoritative plus recursive, delegation to the FreeIPA stub | A client resolves `dns-br1.lab.internal` and `ipa.lab.internal` through the pair |
+| s2-dhcp | Edge relay plus local Kea with a lease store | A client leases across the relay, and the lease survives a Kea restart |
+| s3-overlay | Hub and one branch edge, WireGuard, nftables policy, hub-and-spoke routes | Branch 1 reaches DC subnets and cannot reach branch 2; a key rotation needs no image change |
+| s4-pki | Offline root, step-ca intermediate, ACME issuance | A guest receives a leaf from step-ca and trusts it without a manual copy |
+| s5-identity | FreeIPA, Keycloak federation, one OIDC app | A FreeIPA user logs in to Gitea over OIDC, and no local account exists |
+| s6-radius | FreeRADIUS, `hostapd` wired authenticator, a Linux supplicant | `eapol_test` passes, then a real supplicant completes EAP-TLS |
+| s7-delivery | Registry mirror, egress toggle, pull-through | A guest pulls an image through the hub with egress off, and egress on only for updates |
+| s8-observe | Prometheus, Loki, Grafana, OpenBao | Every role in the scenario emits metrics and logs, and a secret rotates without a rebuild |
+| s9-endpoints | Fleet, PXE, WinPE, a Windows client, the macOS profile | A blank VM PXE-boots to an installer, Windows trusts the root and completes EAP-TLS, and the macOS profile validates |
+| s10-stateful | Print, file, IPAM | Print survives a node loss, IPAM is the address source of truth, and a backup restores |
+| assembly-min | Every role that the minimum topology needs, at once | Hub, branch 1, identity and one client work together, and an OIDC login crosses all of them |
+| assembly-branches | Branches 2 and 3 added as spec entries | Adding branch 3 is one spec entry and one address block, and cutting a branch overlay leaves it resolving, leasing and telling time |
+
+## Evolution
+
+The lab starts hub-and-spoke and is written so each later step is a config
+change, not a redesign. FRR already ships in the edge image, so BGP over the
+tunnels is the first move that scales.
+
+| Stage | Change | Trigger | Cost |
+| --- | --- | --- | --- |
+| 0 | Hub-and-spoke, static WireGuard `AllowedIPs` | now | one peer per branch on the hub |
+| 1 | BGP over the tunnels, hub as route reflector | a second branch, or any change that touches every node | edge config only |
+| 2 | Direct spoke-to-spoke for selected pairs | a branch-to-branch workload that cannot take the hairpin | one extra peer and a more specific route |
+| 3 | A second hub, BGP multipath | hub downtime becomes unacceptable | two hub profiles, every branch peers with both |
+| 4 | Local internet breakout at large branches | SaaS latency or DC egress cost | policy routing per prefix, the hub stops being the only egress |
+| 5 | A control plane for keys and routes (Headscale, NetBird) | more branches than hand-managed keys carry, or short-lived keys required | overlay identity tied to FreeIPA |
+
+The scaling constraint is WireGuard itself: `AllowedIPs` is the routing table.
+In hub-and-spoke a branch needs one peer entry, so the branch config is O(1),
+but the hub is O(N). BGP moves the per-branch route into the protocol. That is
+the step that turns "a flexible number of branches" from a claim into a
+property.
+
+## Reuse in a real rebuild
+
+The point of one scenario per component is that each one becomes a part you can
+carry to a real rebuild. That holds for the mechanism, not for the parameters.
+The split is deliberate and worth stating before someone copies the wrong half.
+
+| Transfers unchanged | Why it survives the move |
+| --- | --- |
+| Role images and their build chain | Same base, same package manifest, same `build.d` assertions. A real estate needs a repin, not a rewrite. |
+| Config templates per role | BIND zones, Kea scopes, FRR and nftables policy, WireGuard peer shape. Only the values change. |
+| Scenario tests | Each one is an acceptance test for one component. That suite is the thing that makes a rebuild safe rather than hopeful. |
+| Interface declarations | What a role consumes and exposes. This is the seam where a component meets the rest of the network. |
+| Renderer and spec format | One TOML entry per node. Scale is a data change. |
+
+| Must be reissued, never carried | Why |
+| --- | --- |
+| Trust root | A root that touches both lab and production makes a lab compromise a production compromise. Build a new hierarchy. |
+| Realm and zone names | `LAB.INTERNAL` and `lab.internal` are placeholders. Real names come from the estate and its DNS ownership. |
+| Address plan | The lab blocks are public placeholders. Reusing them on a real network is an anti-goal. |
+| Every key and shared secret | Generated per host. A carried key is a shared key. |
+| Accounts and enrolments | Hosts and users enrol into the new authority. Nothing is migrated from the lab. |
+
+| Not proven here | What a real rebuild still owes |
+| --- | --- |
+| High availability | Every role is a single instance. A critical role needs a pair, and pair behaviour is untested. |
+| Vendor switch and AP layer | 802.1X on real ports, DHCP snooping, relay on the access switch. The lab proves the server side only. |
+| Scale | Four VMs show the shape. They do not find the limit at forty branches. |
+| Operations | No on-call, no paging, no change control, no backup window. |
+
+So the repo is a reference implementation and an acceptance suite, not a
+deployable bundle. A real rebuild is the same components with new parameters,
+plus the HA and vendor layers the lab does not prove. The parameters are the
+seam: site prefixes, realm, trust root and per-host keys live in `lab.toml` and
+in `lab-secrets/`, so re-pointing the lab at a real estate is a data change with
+a deliberate, visible set of new secrets.
+
+## Repository layout
+
+```
+Containerfile.<role>            one per role
+manifests/packages-common.txt   shared set
+manifests/packages-<role>.txt   role set
+manifests/*.lock                generated third-party pins
+build/                          common.sh, manifest.sh, package-lock.sh
+modules/<role>/                 files copied onto /
+overlay/                        files every role gets
+lab/                            lab.toml, renderer, scenarios, seeds
+endpoints/                      kickstart, WinPE answer files, macOS profile
+tests/                          static gate, image gate, VM harness
+docs/                           design, plans, runbooks
+.github/workflows/              ci.yml, repin-base.yml
+```
+
+## Gates
+
+1. Static: base pin by tag and digest, one package per manifest line, no secret
+   pattern in the tree, every role `FROM` the pinned base, no installation
+   media committed.
+2. Build: each role image builds in a CI matrix.
+3. Image: `bootc container lint`, role units enabled, package lock matches.
+4. Scenario: `lab up <scenario>` boots it and its own test passes.
+5. Teardown: `lab down <scenario>` leaves no domain, network, volume or
+   generated key, and a second `up` of the same scenario succeeds.
+6. Interface: every cross-scenario dependency is declared, and the static check
+   confirms the declarations compose.
+7. Assembly: the add-a-branch and branch-survival tests, run as
+   `assembly-branches` and recorded with a date.
+8. Supply chain: trivy, SBOM, cosign keyless.
+9. Isolation: a test asserts no libvirt network forwards to the host LAN and
+   that the lab ranges do not overlap the host's.
+
+## Secrets and trust
+
+- One offline root CA, generated once by a script, kept in `lab-secrets/`
+  outside git. Two intermediates: step-ca for service TLS, FreeIPA CA for
+  identity.
+- Service TLS is issued over ACME from step-ca. Identity certs come from
+  FreeIPA, which also issues the 802.1X client and server certs.
+- RADIUS shared secrets, Keycloak's bind password, OpenBao unseal material and
+  WireGuard private keys are generated per host and injected at first boot from
+  a seed or a secret store, never baked.
+- Public keys, trust anchors, peer addresses and policy are safe in the image.
+
+## Settled by the builder
+
+The builder check raised ten questions. All now have a call.
+
+| Question | Call |
+| --- | --- |
+| Build connectivity | The build host and CI have internet; the lab guests do not. CI is GitHub Actions with keyless OIDC, as in `dux-atomic`. |
+| Image signing and SBOM | GitHub Actions keyless OIDC, one signature and one SBOM per role image. |
+| Artifact distribution | Images to GHCR by digest. The DC runs a pull-through mirror; the host builds a qcow2 with `bootc-image-builder`; no registry runs inside a branch. |
+| Runtime egress | Deny by default. The DC hub is the only egress, and `lab egress on` enables it for updates. |
+| Root CA storage | Encrypted with age in `lab-secrets/`, excluded from git, with the passphrase kept offline. Root generation is a one-time operator script. CI generates a throwaway root per run. |
+| Bootstrap automation | Everything except the operator's root CA, the FreeIPA admin password and the Windows image are automated. All three are runbook steps. |
+| External services | None by default. APNs and Entra are recorded as an egress variant for Apple and Autopilot enrolment, not the lab path. |
+| Versions and crypto | Pin to Stream 10's shipped NEVRAs plus digest-pinned containers. System crypto policy DEFAULT. |
+| Host NICs | One 1 GbE NIC, no VLAN or SR-IOV requirement. Segmentation is one libvirt internal network per segment, never a bridge to the LAN. |
+
+## Platform evidence, checked 2026-11-26
+
+Every fact below was read from a current source today, not recalled from
+training data. The plan carries the same table, and a failing fact is a plan
+bug.
+
+| Fact | Value | Source |
+| --- | --- | --- |
+| Base image | `quay.io/centos-bootc/centos-bootc:stream10@sha256:0df2ed8f…`, multi-arch, cosign-signed | Quay tag API, build of 2026-11-13 |
+| Stream 10 lifecycle | maintained until 2030-05-31 | centos.org release notes |
+| Modularity | removed in EL10. No modular content ships, so FreeIPA is a plain package | RHEL 10 considerations, software management |
+| FreeIPA | `ipa-server-dns 4.13.4-1.el10`, AppStream | Stream 10 package index |
+| Kea | `kea 2.6.3-1.el10`, BaseOS | mirror.stream.centos.org |
+| FRR | `frr 10.6.1-3.el10`, AppStream | Stream 10 package index |
+| FreeRADIUS | `freeradius 3.2.8-2.el10`, AppStream | Stream 10 package index |
+| hostapd | `hostapd 2.11-2.el10`, AppStream, with a documented wired authenticator procedure | RHEL 10 configuring and managing networking, ch. 20 |
+| 802.1X recipe | Red Hat documents hostapd plus FreeRADIUS with EAP-TTLS and LDAP inner auth. EAP-TLS works but is not the vendor default | same chapter |
+| Image to disk | `bootc-image-builder` emits qcow2. Config lives under `/usr/lib/image-builder/bootc`, and the older path is legacy | osbuild docs, RHEL 10 image mode ch. 6 |
+
+Two consequences, both already reflected in the plan:
+
+- EAP-TLS stays the target, because it is what this lab is for. The documented
+  EAP-TTLS plus LDAP recipe is the fallback if a Windows supplicant refuses,
+  and s6 owns that decision.
+- The builder config goes to the current path, not the legacy one.
+
+## Risks
+
+| Risk | Effect | Mitigation |
+| --- | --- | --- |
+| The hub is a single point | Every branch loses the DC at once | Branch-local DNS, DHCP and NTP keep the LAN alive; stage 3 adds a second hub |
+| Static `AllowedIPs` drift | A new branch needs a hub edit and nothing warns when it is missed | The add-a-branch test; BGP is stage 1 |
+| Branch-to-branch hairpin | Latency and DC bandwidth | Direct paths are stage 2, and most branch traffic is DC-bound anyway |
+| An assembly run needs a stopped desktop | The desktop is unavailable for a scheduled block | Any single scenario runs inside normal work. Schedule assembly, or record it on the EliteDesk |
+| Integration evidence is sampled | A cross-component breakage survives a green scenario | The interface-composition gate plus a dated assembly run |
+| The third branch never runs | A three-branch interaction is never observed | `assembly-branches` proves two branches plus the hub, and the third stays spec-tested and documented |
+| Teardown leaks state | A stale network or volume breaks the next scenario | The teardown gate, which re-runs `up` after `down` |
+| libvirt tooling absent | s0 cannot start | Install libvirt, `virt-install` and a seed ISO tool, then prove one guest boots |
+| `hostapd` wired driver is unproven here | Real supplicants cannot complete 802.1X | Verify it in s6 before the endpoint gate; `eapol_test` remains the server proof |
+| EAP-TLS is not the vendor recipe | A Windows supplicant may fail where EAP-TTLS would pass | s6 proves EAP-TLS with a real supplicant, and EAP-TTLS plus LDAP is the documented fallback |
+| Fleet Windows enrolment is uneven | Windows shows inventory but not full MDM | Verify manual enrolment early; document Intune for the production path |
+| Windows PXE is WinPE, not Autopilot | The onboarding story differs from a real estate | Record the gap in the endpoint runbook |
+| FreeIPA and BIND fight over a zone | Duplicate or missing records | FreeIPA owns `ipa.lab.internal`; BIND delegates it |
+| FreeIPA install needs working DNS and clock | A failed install on first boot | Order s1 before s5, and assert clock and forwarders |
+| Package gaps in Stream 10 | Roles do not resolve | EPEL 10 and vendor repositories, confirmed per role before s5 |
+| A libvirt network bridges to the home LAN | The lab leaks DHCP or DNS | The isolation gate fails the build |
+
+## Open questions
+
+- s5 application set: Gitea or Forgejo, and the Grafana stack or
+  VictoriaMetrics.
+- Whether the APNs and Entra egress variant is worth building, or only
+  documenting.
+- Whether Proxmox parity is wanted once the libvirt lab is stable.
+- Whether the assembly run ever moves to the EliteDesk, so the desktop never
+  has to stop.
+
+## Left to the builder
+
+- Install and prove the host prerequisites, then record the measured RAM and
+  disk footprint of each scenario, single and assembly.
+- Prove one scenario cycle end to end: `up`, test, `down`, `up` again. Record
+  the wall-clock rebuild time against the ten-minute rule.
+- Confirm `ipa-server`, `kea`, `frr`, `freeradius`, `hostapd` and Fleet resolve
+  on the Stream 10 base, and name the repository that serves each.
+- Confirm the CentOS Stream 10 bootc digest and add the repin workflow.
+- Decide the exact cloud-init seed layout, and prove a VM rebuild from the spec.
+- Write the branch template so branch *n* is data, not code, and prove it with
+  the add-a-branch test.
+- Prove the `hostapd` wired authenticator with the Windows native supplicant.
+- Build the PXE path for Linux first, then WinPE, and record what differs.
+- Generate and schema-check the macOS profile from the same PKI the other
+  clients use.
+- Write the step-ca and FreeIPA CA bootstrap so the root never enters the repo.
+- Write the interface declarations per scenario, and the static check that
+  composes them.
+- Size each role's VM and record the scenario totals.
