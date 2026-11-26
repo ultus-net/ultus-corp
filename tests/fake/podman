@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# A stand-in for podman that knows only what the disk build asks.
+set -uo pipefail
+
+case "${1:-}" in
+  info) echo "${FAKE_PODMAN_ROOTLESS:-true}" ;;
+  image)
+    case "${2:-}" in
+      exists) exit 0 ;;
+      inspect) echo "fakeimageid00000000000000000000000000000000000000000000000000000" ;;
+      *) echo "fake podman: unsupported image $*" >&2; exit 1 ;;
+    esac ;;
+  *) echo "fake podman: unsupported command $*" >&2; exit 1 ;;
+esac

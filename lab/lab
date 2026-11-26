@@ -167,6 +167,8 @@ def teardown(state: dict, state_file: Path) -> int:
 
 
 def cmd_up(args: argparse.Namespace) -> int:
+    if shutil.which("virsh") is None:
+        fail("virsh is not installed; run lab doctor")
     spec = load_spec()
     scenario = args.scenario
     try:
@@ -333,6 +335,20 @@ def cmd_doctor(_: argparse.Namespace) -> int:
             problems.append(tool)
     if shutil.which("xorriso") is None and shutil.which("genisoimage") is None:
         problems.append("xorriso or genisoimage")
+    podman = os.environ.get("LAB_PODMAN", "podman").split()
+    if shutil.which(podman[0]) is None:
+        problems.append(podman[0])
+    else:
+        rootless = subprocess.run(
+            [*podman, "info", "--format", "{{.Host.Security.Rootless}}"],
+            capture_output=True,
+            text=True,
+        )
+        if rootless.stdout.strip() == "true":
+            problems.append(
+                "rootful podman for the disk build (set LAB_PODMAN, "
+                "for example LAB_PODMAN='sudo podman')"
+            )
     free = shutil.disk_usage(ROOT).free
     if free < 10 * 1024**3:
         problems.append("10 GiB free disk")
@@ -353,6 +369,9 @@ def cmd_prune(args: argparse.Namespace) -> int:
     cache = ROOT / "build" / "out"
     if cache.is_dir():
         shutil.rmtree(cache)
+    disks = ROOT / "build" / "vm" / "cache"
+    if disks.is_dir():
+        shutil.rmtree(disks)
     print("pruned unused build output")
     return 0
 

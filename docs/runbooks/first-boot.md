@@ -25,6 +25,28 @@ bash tests/scenarios/s0-base.sh
 seed, builds `<node>-seed.iso` with `xorriso`, asks `lab/build-disk.sh` for a
 qcow2, then defines and starts the domain.
 
+## Host prerequisites
+
+`lab doctor` names every gap. The package install and the daemon enable run
+once, as root:
+
+```bash
+sudo pacman -S --needed libvirt qemu-full edk2-ovmf libisoburn dnsutils
+sudo systemctl enable --now libvirtd
+sudo usermod -aG libvirt "$USER"
+```
+
+`bootc-image-builder` needs rootful podman because it mounts loop devices, so
+the disk build is the one step that escalates. Point `LAB_PODMAN` at it:
+
+```bash
+LAB_PODMAN='sudo podman' lab up s0-base
+```
+
+The qcow2 is cached under `build/vm/cache/<role>-<image-id>.qcow2`. A rebuilt
+image gets a new id and therefore a new disk; the old entry is dropped by
+`lab prune`.
+
 ## Known gaps
 
 - The disk build needs the `bootc-image-builder` container and about 5 GiB of

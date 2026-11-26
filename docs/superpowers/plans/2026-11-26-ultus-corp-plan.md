@@ -56,6 +56,17 @@ sudo usermod -aG libvirt "$USER"
 named next step rather than a stack trace. Task 5's tests use a fake `virsh`
 and need none of this. Task 6 is the first task that does.
 
+`bootc-image-builder` refuses rootless podman, and the disk build mounts loop
+devices, so that one step runs as root. `lab/build-disk.sh` builds through
+`${LAB_PODMAN:-podman}` and names the fix when it finds rootless podman:
+
+```bash
+LAB_PODMAN='sudo podman' lab up s0-base
+```
+
+The built qcow2 is cached under `build/vm/cache/<role>-<image-id>.qcow2`, so the
+privileged step runs once per image rather than once per VM.
+
 ## Review Focus
 
 - A failed `lab up` leaves half its objects behind. Expectation: teardown runs from recorded state, and a teardown that cannot finish keeps its state and exits non-zero.
@@ -827,10 +838,19 @@ at `build/vm/qcow2/disk.qcow2`. The builder is
 `quay.io/centos-bootc/bootc-image-builder`, pinned by digest in
 `manifests/builder.txt`.
 
+The builder refuses rootless podman, and rootful podman cannot see an image in
+the user's storage. `build-disk.sh` reads the builder from
+`${LAB_PODMAN:-podman}`, refuses rootless podman by name, and copies the image
+into that storage on a cache miss only. The qcow2 is cached at
+`build/vm/cache/<role>-<image-id>.qcow2`, so the privileged step runs once per
+image and a later `lab up` needs no root. `tests/test-lab.sh` proves both paths
+with a fake `podman`: a cache hit never runs the builder, and rootless podman is
+refused.
+
 `blueprint.toml` sets the root filesystem to `xfs` and the operator user with
 the key from `lab-secrets/id_ed25519.pub`, read at build time and never
 committed. `lab up` calls `build-disk.sh` before creating the volume, then
-creates a thin overlay so the base image is shared.
+copies the cached disk into the scenario directory.
 
 `docs/runbooks/first-boot.md` names every mechanism this scenario exercises
 (`bootc` install, the NoCloud seed, `systemd`, `qemu-guest-agent`) with the

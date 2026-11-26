@@ -78,6 +78,14 @@ class TestDomainXml(unittest.TestCase):
         xml = domain_xml(dns_a, spec)
         self.assertNotIn("<forward", xml)
 
+    def test_domain_xml_attaches_readonly_seed(self):
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        xml = domain_xml(dns_a, spec)
+        self.assertIn("device='cdrom'", xml)
+        self.assertIn("run/s1-dns/ultus-s1-dns-dns-a-seed.iso", xml)
+        self.assertIn("<readonly/>", xml)
+
 
 class TestInterfaceMac(unittest.TestCase):
     def test_mac_unicast_local_unique(self):
@@ -128,3 +136,21 @@ class TestSeedFiles(unittest.TestCase):
         # Check addresses are formatted as mask/prefix
         self.assertIn("10.100.10.11/24", files["network-config"])
         self.assertIn("10.100.20.11/24", files["network-config"])
+
+    def test_seed_files_installs_ssh_key(self):
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        files = seed_files(dns_a, spec, "ssh-ed25519 AAAA test")
+        user = json.loads(files["user-data"].split("\n", 1)[1])
+        self.assertEqual(
+            user["users"],
+            [{"name": "root", "ssh_authorized_keys": ["ssh-ed25519 AAAA test"]}],
+        )
+        self.assertFalse(user["ssh_pwauth"])
+
+    def test_seed_files_without_key_grants_no_login(self):
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        files = seed_files(dns_a, spec)
+        user = json.loads(files["user-data"].split("\n", 1)[1])
+        self.assertEqual(user["users"], [])

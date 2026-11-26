@@ -42,4 +42,11 @@ assert_ok    "force down repairs state"    bash -c 'lab down s0-base --force 2>&
 assert_ok    "force down leaves no domain" bash -c '! virsh list --all --name | grep -q ultus-s0-base'
 assert_ok    "force down clears state"     bash -c '! test -e run/s0-base/state.json'
 
+mkdir -p build/vm/cache
+printf 'cached\n' > build/vm/cache/dns-fakeimageid0.qcow2
+assert_ok    "cached disk skips the builder" bash -c 'lab/build-disk.sh dns run/cache-test.qcow2'
+assert_eq    "cached disk is copied" "cached" "$(cat run/cache-test.qcow2)"
+rm -f build/vm/cache/dns-fakeimageid0.qcow2 run/cache-test.qcow2
+assert_fails "rootless podman is refused"    lab/build-disk.sh dns run/no-cache.qcow2
+
 finish
