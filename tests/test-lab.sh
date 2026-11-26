@@ -70,7 +70,7 @@ assert_ok    "the disk comes from the current image" \
 assert_ok    "the reload is logged" \
   bash -c "grep -q '^save' $FAKE_LOG && grep -q '^load' $FAKE_LOG"
 
-rm -f build/vm/cache/dns-fakeimageid0.qcow2
+rm -f build/vm/cache/dns-fakeimageid0.qcow2 build/vm/cache/dns-fakeimageid0.qcow2.id
 export FAKE_LOAD_ID=wrongid000000
 assert_fails "a mismatched load fails closed"        build_stale
 rm -f "$FAKE_STORAGE_ID_FILE" "$FAKE_LOG" run/stale-test.qcow2
