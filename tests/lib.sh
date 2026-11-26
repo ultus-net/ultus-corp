@@ -15,6 +15,7 @@ record() {
   shift
   local observed="$1"
   shift
+  observed=${observed//$'\n'/\\n}
   printf '%s|%s|%s|%s|%s\n' "$name" "$status" "$*" "$expected" "$observed" >> "$EVIDENCE"
 }
 
