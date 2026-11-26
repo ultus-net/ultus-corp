@@ -88,7 +88,7 @@ and need none of this. Task 6 is the first task that does.
   - `check_no_secret_patterns <dir>`
   - `check_no_install_media <dir>`
   - `check_role_records <roles-dir|file>...`
-- Produces: `tests/lib.sh` with `assert_ok`, `assert_fails`, `assert_eq`, and `record`. Every assertion appends one line to `run/evidence/static.log`: name, status, command, expected, observed.
+- Produces: `tests/lib.sh` with `assert_ok`, `assert_fails`, `assert_eq`, and `record`. Every assertion appends one line to `run/evidence/<gate>.log`, where `<gate>` is the test script's name without `test-` and `.sh`: `run/evidence/static.log` for `tests/test-static.sh`. The line holds name, status, command, expected, observed.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -151,7 +151,8 @@ headings `## Linux mechanism`, `## Windows concept`, `## Where it breaks`,
 
 ```bash
 FAILURES=0
-EVIDENCE=${EVIDENCE:-run/evidence/static.log}
+_name=${0##*/}; _name=${_name%.sh}; _name=${_name#test-}
+EVIDENCE=${EVIDENCE:-run/evidence/$_name.log}
 mkdir -p "$(dirname "$EVIDENCE")"
 . build/checks.sh
 
@@ -291,17 +292,18 @@ build_role() {
 }
 ```
 
-`Containerfile.dns` starts with `ARG BASE`, then `FROM ${BASE}`, copies the
-joined manifest, installs from the lock when one exists and otherwise resolves,
-cleans the dnf cache, copies `modules/` onto `/`, and runs
-`/usr/libexec/ultus-corp/build.d/` in name order. The lint runs from the build
-script so it runs on a cached build.
+`Containerfile.dns` starts with `ARG BASE`, then `FROM ${BASE}`, bind-mounts
+`build/out/install-<role>.txt` (the lock when one exists, the joined manifest
+otherwise), installs from it, cleans the dnf cache, copies `modules/base/` onto
+`/`, and runs `/usr/libexec/ultus-corp/build.d/` in name order. The lint runs
+from the build script so it runs on a cached build.
 
-`modules/` must exist before the first build, or the `COPY` fails. Task 2
-therefore creates `modules/base/usr/libexec/ultus-corp/build.d/00-base.sh`,
-which asserts the base contract the other modules rely on: `bootc` and
-`greenboot` are installed and the bootc unit is present. Task 3 adds
-`modules/dns/` beside it; both trees merge onto `/`.
+`modules/` must exist before the first build, or the bind-mount has no source.
+Task 2 therefore creates
+`modules/base/usr/libexec/ultus-corp/build.d/00-base.sh`, which asserts the base
+contract the other modules rely on: `bootc` and `greenboot` are installed and
+the bootc unit is present. `COPY modules/base/ /` copies the tree's contents onto
+`/`. Task 3 adds `COPY modules/dns/ /` beside it.
 
 `build/package-lock.sh resolve <role>` builds the image, then writes
 `podman run --rm "$(lab_image "$role")" rpm -qa --qf '%{NAME}-%{EVR}.%{ARCH}\n' | sort`
@@ -326,6 +328,7 @@ git commit -m "feat: pinned base, build argument and first role image"
 
 **Files:**
 - Create: `manifests/packages-dns.txt`
+- Modify: `Containerfile.dns` (add `COPY modules/dns/ /`)
 - Create: `modules/dns/usr/libexec/ultus-corp/build.d/50-dns.sh`
 - Create: `modules/dns/usr/libexec/ultus-corp/provision.sh`
 - Create: `modules/dns/etc/named.conf`, `modules/dns/etc/unbound/unbound.conf`
@@ -416,12 +419,21 @@ block and runs it in the image, so the record is executed rather than read.
 
 - [ ] **Step 4: Record the resolved package set**
 
-Run `bash tests/test-packages.sh`, then
-`bash build/package-lock.sh resolve dns`. Expected: the test passes and
-`manifests/packages-dns.lock` lists real NEVRAs from Stream 10. Rebuild with
-the lock present, then prove the lock is what got installed:
+Run the build first, because `tests/test-packages.sh` asserts against an image
+and does not build one. `build/package-lock.sh resolve dns` builds from the
+manifest and writes the lock, so it produces both:
 
 ```bash
+bash build/package-lock.sh resolve dns
+bash tests/test-packages.sh
+```
+
+Expected: the test passes and `manifests/packages-dns.lock` lists real NEVRAs
+from Stream 10. Rebuild with the lock present, then prove the lock is what got
+installed:
+
+```bash
+bash -c '. build/common.sh && build_role dns'
 diff <(podman run --rm "$(lab_image dns)" rpm -qa --qf '%{NAME}-%{EVR}.%{ARCH}\n' | sort) \
      manifests/packages-dns.lock
 ```
