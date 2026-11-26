@@ -26,6 +26,9 @@ __all__ = [
     "Spec",
     "load",
     "nodes_for",
+    "primary_of",
+    "secondaries_of",
+    "node_payload",
     "network_xml",
     "domain_xml",
     "seed_files",
@@ -42,6 +45,7 @@ NODE_KEYS = {
     "name",
     "site",
     "role",
+    "secondary",
     "vcpus",
     "ram_mib",
     "disk_gib",
@@ -98,6 +102,7 @@ class Node:
     ram_mib: int
     disk_gib: int
     interfaces: list[Interface] = field(default_factory=list)
+    secondary: str | None = None
 
 
 @dataclass(frozen=True)
@@ -299,10 +304,44 @@ def load(path: str | Path) -> Spec:
                 ram_mib=ram_mib,
                 disk_gib=disk_gib,
                 interfaces=interfaces,
+                secondary=(
+                    str(node_raw["secondary"]) if "secondary" in node_raw else None
+                ),
             )
         )
 
+    by_name = {node.name: node for node in nodes}
+    for node in nodes:
+        if node.secondary is None:
+            continue
+        primary = by_name.get(node.secondary)
+        if primary is None:
+            raise ValueError(
+                f"node {node.name} has an unknown secondary: {node.secondary}"
+            )
+        if primary.scenario != node.scenario:
+            raise ValueError(
+                f"node {node.name} names a secondary in scenario "
+                f"{primary.scenario}, not {node.scenario}"
+            )
+        if primary.secondary is not None:
+            raise ValueError(
+                f"node {node.name} names {primary.name}, which is itself a secondary"
+            )
+
     return Spec(lab=lab, sites=sites, scenarios=scenarios, nodes=nodes)
+
+
+def primary_of(node: Node, spec: Spec) -> Node | None:
+    """The node this one copies its zone from, or None when it owns the zone."""
+    if node.secondary is None:
+        return None
+    return next(n for n in spec.nodes if n.name == node.secondary)
+
+
+def secondaries_of(node: Node, spec: Spec) -> list[Node]:
+    """The nodes that copy this one's zone."""
+    return [n for n in spec.nodes if n.secondary == node.name]
 
 
 def nodes_for(spec: Spec, scenario: str) -> list[Node]:
@@ -382,6 +421,36 @@ def _prefix_for(node: Node, spec: Spec, segment_name: str) -> int:
     return ipaddress.IPv4Network(cidr).prefixlen
 
 
+def node_payload(node: Node, spec: Spec) -> dict:
+    """The fact file the guest reads at /run/ultus-corp/node.json."""
+    payload: dict = {
+        "node": f"ultus-{node.scenario}-{node.name}",
+        "name": node.name,
+        "fqdn": f"{node.name}.{spec.lab.domain}",
+        "role": node.role,
+        "scenario": node.scenario,
+        "interfaces": [
+            {
+                "segment": iface.segment,
+                "address": iface.address,
+                "prefix": _prefix_for(node, spec, iface.segment),
+                "gateway": iface.gateway,
+                "nameservers": iface.nameservers,
+            }
+            for iface in node.interfaces
+        ],
+    }
+    primary = primary_of(node, spec)
+    if primary is not None:
+        # The zone comes from this address. The node's own resolver still
+        # forwards to its own named, so the two are kept as separate fields.
+        payload["secondary"] = primary.interfaces[0].address
+    peers = secondaries_of(node, spec)
+    if peers:
+        payload["secondaries"] = [peer.interfaces[0].address for peer in peers]
+    return payload
+
+
 def seed_files(node: Node, spec: Spec, ssh_key: str | None = None) -> dict[str, str]:
     """NoCloud seed as three strings. JSON is a valid YAML subset."""
     instance_id = f"ultus-{node.scenario}-{node.name}"
@@ -404,23 +473,6 @@ def seed_files(node: Node, spec: Spec, ssh_key: str | None = None) -> dict[str, 
         }
     network = {"version": 2, "ethernets": ethernets}
 
-    node_payload = {
-        "node": instance_id,
-        "name": node.name,
-        "fqdn": fqdn,
-        "role": node.role,
-        "scenario": node.scenario,
-        "interfaces": [
-            {
-                "segment": iface.segment,
-                "address": iface.address,
-                "prefix": _prefix_for(node, spec, iface.segment),
-                "gateway": iface.gateway,
-                "nameservers": iface.nameservers,
-            }
-            for iface in node.interfaces
-        ],
-    }
     user_data = "#cloud-config\n" + json.dumps(
         {
             "hostname": node.name,
@@ -436,7 +488,7 @@ def seed_files(node: Node, spec: Spec, ssh_key: str | None = None) -> dict[str, 
                 {
                     "path": "/run/ultus-corp/node.json",
                     "permissions": "0644",
-                    "content": json.dumps(node_payload),
+                    "content": json.dumps(node_payload(node, spec)),
                 }
             ],
             "runcmd": ["systemctl enable --now ultus-provision.service"],

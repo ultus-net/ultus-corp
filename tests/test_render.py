@@ -4,7 +4,7 @@ import json
 
 from pathlib import Path
 
-from lab.render import load, nodes_for, network_xml, domain_xml, seed_files, interface_mac, Spec, Node, Segment
+from lab.render import load, nodes_for, network_xml, domain_xml, seed_files, interface_mac, node_payload, Spec, Node, Segment
 
 
 class TestLoad(unittest.TestCase):
@@ -191,3 +191,26 @@ class TestSeedFiles(unittest.TestCase):
         files = seed_files(dns_a, spec)
         user = json.loads(files["user-data"].split("\n", 1)[1])
         self.assertEqual(user["users"], [])
+
+
+class TestTopology(unittest.TestCase):
+    def test_primary_lists_its_secondaries(self):
+        spec = load("lab/lab.toml")
+        payload = node_payload(nodes_for(spec, "s1-dns")[0], spec)
+        self.assertEqual(payload["secondaries"], ["10.100.10.12"])
+        self.assertNotIn("secondary", payload)
+
+    def test_secondary_names_the_primary_address(self):
+        # provision.sh writes `masters { … }`, which needs an address, not a name.
+        spec = load("lab/lab.toml")
+        payload = node_payload(nodes_for(spec, "s1-dns")[1], spec)
+        self.assertEqual(payload["secondary"], "10.100.10.11")
+        self.assertNotIn("secondaries", payload)
+
+    def test_secondary_must_exist(self):
+        with self.assertRaises(ValueError):
+            load("tests/fixtures/lab-unknown-secondary.toml")
+
+    def test_a_secondary_cannot_copy_a_secondary(self):
+        with self.assertRaises(ValueError):
+            load("tests/fixtures/lab-secondary-of-secondary.toml")

@@ -25,6 +25,16 @@ bash tests/scenarios/s0-base.sh
 seed, builds `<node>-seed.iso` with `xorriso`, asks `lab/build-disk.sh` for a
 qcow2, then defines and starts the domain.
 
+## Second scenario: `s1-dns`
+
+`bash tests/scenarios/s1-dns.sh` runs a primary and a secondary of the same
+image. It proves the zone transfer two ways: the secondary answers the primary's
+record, and it keeps answering while the primary is suspended. The gate resumes
+the primary and tears both nodes down.
+
+Both nodes need one cached disk, because they share the image. A rebuilt dns
+image costs one rootful `lab/build-disk.sh` run, as for any other role.
+
 ## Host prerequisites
 
 `lab doctor` names every gap. The package install and the daemon enable run

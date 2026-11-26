@@ -10,4 +10,4 @@ Development in progress. See [docs/runbooks/](docs/runbooks/) for details and st
 
 ## Documentation
 
-The detailed specification, runbooks, and architectural decisions live in `docs/`. See the [specification document](https://github.com/ultus-corp/ultus-corp/blob/main/docs/ARCHITECTURE.md) for the complete context.
+The detailed specification, runbooks, and architectural decisions live in `docs/`. See the [design document](docs/superpowers/specs/2026-11-26-ultus-corp-design.md) and the [P0 plan](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md).

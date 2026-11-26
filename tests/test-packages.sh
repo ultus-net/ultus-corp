@@ -21,8 +21,24 @@ assert_ok "unbound config valid"   podman run --rm "$img" unbound-checkconf /etc
 # effective chroot is asserted rather than the file's syntax alone.
 assert_eq "unbound runs unchrooted" "" \
   "$(podman run --rm "$img" unbound-checkconf -o chroot /etc/unbound/unbound.conf)"
+
+# And the daemon itself has to start and bind. This container path has no
+# systemd notify socket, so it cannot reproduce the chroot failure; the
+# assertion above is what covers that one.
+unbound_binds() {
+  podman run --rm "$img" bash -c '
+    unbound -d &
+    pid=$!
+    sleep 3
+    kill -0 "$pid" || { echo "unbound exited at startup"; exit 1; }
+    ss -lun | grep -q "127.0.0.1:53" || { echo "unbound does not listen on 127.0.0.1:53"; exit 1; }
+    kill "$pid"
+  '
+}
+assert_ok "unbound starts and binds loopback" unbound_binds
 assert_fails "the health check fails without a resolver" \
-  podman run --rm "$img" /etc/greenboot/check/required.d/50-dns-health.sh
+  podman run --rm -e ULTUS_HEALTH_TRIES=1 "$img" \
+  /etc/greenboot/check/required.d/50-dns-health.sh
 assert_ok "provision unit enabled" podman run --rm "$img" systemctl is-enabled ultus-provision.service
 assert_ok "health check executable" \
   podman run --rm "$img" test -x /etc/greenboot/check/required.d/50-dns-health.sh

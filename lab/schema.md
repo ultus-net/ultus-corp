@@ -57,16 +57,23 @@ Top-level keys inside a node are invalid.
 
 | Key | Type | Required | Default | Rejection |
 |-----|------|----------|---------|-----------|
-| `scenario` | string | yes | - | empty, no-existent scenario |
-| `name` | string | yes | - | empty, duplicate, or reserved ("base", "dns", "base-a", "dns-a", "dns-b") |
-| `site` | string | yes | - | empty or no-existent site |
-| `role` | string | no | "unknown" | - |
+| `scenario` | string | yes | - | empty, or a scenario that does not exist |
+| `name` | string | yes | - | empty or duplicate |
+| `site` | string | yes | - | empty, or a site that does not exist |
+| `role` | string | yes | - | - |
+| `secondary` | string | no | - | names a node that does not exist, belongs to another scenario, or is itself a secondary |
 | `vcpus` | integer | yes | - | < 1 |
 | `ram_mib` | integer | yes | - | < 1 |
 | `disk_gib` | integer | yes | - | < 1 |
 
 Each node is a host within a scenario. The renderer names domains as
 `ultus-{scenario}-{node}` and provides seed files for cloud-init.
+
+`secondary` names the node this one copies its zone from. The renderer resolves
+that name to the primary's first interface address and writes it into the seed,
+so the node needs no other source for it. A node named by another node's
+`secondary` receives the addresses of its secondaries, which become
+`allow-transfer` and `also-notify` entries in its zone stanza.
 
 ### `[[node.interface]]` tables
 
@@ -95,4 +102,4 @@ SHA-256 hashing of the scenario-node-segment string.
 - Node set size exceeding scenario's `vm_budget` total
 - Node total RAM exceeding scenario's `ram_budget_mib`
 - Duplicate MAC addresses (detects early via hash check)
-- Reserved node names ("base", "dns", "base-a", "dns-a", "dns-b")
+- A `secondary` that names a node in another scenario, or one that is itself a secondary

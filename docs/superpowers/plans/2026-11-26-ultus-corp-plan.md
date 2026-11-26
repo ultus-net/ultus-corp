@@ -942,61 +942,85 @@ git commit -m "feat: s0-base boots a bootc guest from image-builder output"
 
 **Files:**
 - Create: `tests/scenarios/s1-dns.sh`
+- Create: `tests/test-provision.sh`
 - Modify: `lab/lab.toml` (two `s1-dns` nodes)
+- Modify: `lab/render.py` (`secondary` in the spec, the seed and the helpers)
 - Modify: `modules/dns/var/named/lab.internal.zone` (delegation records)
-- Modify: `modules/dns/usr/libexec/ultus-corp/provision.sh` (secondary mode)
+- Modify: `modules/dns/usr/libexec/ultus-corp/provision.sh` (primary and secondary mode)
+- Modify: `modules/dns/usr/lib/systemd/system/ultus-dns-ready.service` (syntax only)
 
 **Interfaces:**
 - Consumes: everything from Task 6.
 - Produces: a primary and a secondary that both answer, a delegation stub for
-  `ipa.lab.internal`, and a boot-time secondary configuration driven by the
-  seed.
+  `ipa.lab.internal`, and a boot-time role configuration driven by the seed.
 
 - [ ] **Step 1: Write the failing test**
 
-`tests/scenarios/s1-dns.sh` asserts: both nodes answer
-`base-a.lab.internal`; the secondary answers after the primary is suspended
-with `virsh suspend`; `dig +norec` to the primary returns `aa` for
-`lab.internal`; and `dig SOA ipa.lab.internal` returns the delegation record.
-Each assertion records the full dig output, not just success.
+`tests/scenarios/s1-dns.sh` asserts: the primary answers its own record; the
+secondary answers the primary's record, which it can only learn by transfer;
+the secondary never serves its own address for that name; `dig +norec` to the
+primary returns `aa` for `lab.internal`; the `ipa` name is delegated; the
+secondary keeps answering while the primary is suspended with `virsh suspend`;
+and the primary answers again after `virsh resume`.
 
 ```bash
-assert_ok "secondary answers after failover" bash -c "
-  virsh suspend ultus-s1-dns-dns-a
-  for i in \$(seq 12); do
-    dig +short +time=2 @${dns_b} base-a.lab.internal | grep -qx ${addr_a} && exit 0
-    sleep 5
-  done
-  exit 1"
+assert_ok "secondary answers the copied zone" timeout 300 \
+  bash -c "until dig +short +time=2 @${addr_b} dns-a.lab.internal | grep -qx ${addr_a}; do sleep 2; done"
+virsh suspend ultus-s1-dns-dns-a
+assert_ok "secondary answers without the primary" timeout 120 \
+  bash -c "until dig +short +time=2 @${addr_b} dns-a.lab.internal | grep -qx ${addr_a}; do sleep 2; done"
 ```
+
+The assertion is the primary's address, not a shared name: the secondary's
+shipped copy is deleted at provisioning, so only a completed transfer can
+produce it.
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `bash tests/scenarios/s1-dns.sh`
-Expected: FAIL, `dns-b does not answer`, because only one node is defined.
+Expected: FAIL, `secondary answers the copied zone`, because no node carries
+`secondary` yet and the zone is never copied.
 
 - [ ] **Step 3: Add the second node and the delegation**
 
-`lab.toml` gains `dns-b` in the `mgmt` segment with `role = "dns"` and
-`secondary = "dns-a"`. The renderer writes that field into
-`/run/ultus-corp/node.json` through the seed. `provision.sh` reads it and
-writes the `type secondary` stanza with `masters` and `allow-transfer`, or the
-primary stanza with `also-notify`. Nothing node-specific is written at build
-time.
+`lab.toml` gains `secondary = "dns-a"` on `dns-b`. The renderer validates that
+the named node exists, sits in the same scenario, and is not itself a secondary.
+It then resolves the name to the primary's first interface address and writes it
+into `/run/ultus-corp/node.json` as `secondary`, because `masters { … }` needs an
+address. A node that others name receives `secondaries`, the addresses of those
+nodes.
 
-The zone file carries an `NS` delegation to `ipa.lab.internal` with an `A` for
-the future FreeIPA host. The record exists before the host does, so the
-delegation is proven independently of the identity work.
+`provision.sh` builds the whole zone stanza from the seed. A primary gets
+`allow-transfer` and `also-notify` for its secondaries. A secondary gets
+`masters` and `allow-transfer { none; }`, and its shipped zone file is deleted:
+the copy carries the master's serial, so BIND would serve it instead of
+transferring, and the stale records would outlive a transfer that never
+happened. The unbound forwarder is always this node's own address, because a
+secondary forwarding to its primary fails its own health check during a failover.
+
+`ultus-dns-ready.service` drops `-z`. Loading the zones fails on a secondary
+before the transfer, and the health check already proves the zone answers.
+`50-dns-health.sh` retries for thirty seconds for the same reason, and reads the
+reply status rather than the answer text.
+
+The zone file carries an `NS` delegation to `ipa.lab.internal` with glue `A` for
+the future FreeIPA host on `10.100.10.53`. The record exists before the host
+does, so the delegation is proven independently of the identity work.
+
+`tests/test-provision.sh` runs `provision.sh` inside the image against the
+renderer's own payload for both nodes, so the stanza, the deletion and the
+forwarder are proven without a hypervisor.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `bash tests/scenarios/s1-dns.sh`, then `lab down s1-dns`.
-Expected: all `ok`, and the teardown check passes.
+Run: `bash tests/test-provision.sh`, then `bash tests/scenarios/s1-dns.sh`, then
+`lab down s1-dns`. Expected: all `ok`, and the teardown check passes, leaving no
+domain, network or seed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lab/lab.toml modules/dns tests/scenarios/s1-dns.sh
+git add lab/lab.toml lab/render.py modules/dns tests/scenarios/s1-dns.sh tests/test-provision.sh
 git commit -m "feat: s1-dns primary, secondary and delegation"
 ```
 

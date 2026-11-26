@@ -68,6 +68,7 @@ scenario = "s1-dns"
 name = "dns-b"
 site = "dc"
 role = "dns"
+secondary = "dns-a"
 vcpus = 1
 ram_mib = 1024
 disk_gib = 8

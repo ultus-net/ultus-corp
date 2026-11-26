@@ -7,3 +7,9 @@ $TTL 3600
         300 )      ; minimum
 @       IN  NS  dns-a.lab.internal.
 dns-a   IN  A   127.0.0.2
+
+; Delegated to the identity node before that node exists, so the delegation is
+; proven independently of the FreeIPA work. The glue address is the identity
+; node's reserved mgmt address.
+ipa     IN  NS  ipa.lab.internal.
+ipa     IN  A   10.100.10.53
