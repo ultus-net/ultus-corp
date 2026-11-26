@@ -65,7 +65,12 @@ LAB_PODMAN='sudo podman' lab up s0-base
 ```
 
 The built qcow2 is cached under `build/vm/cache/<role>-<image-id>.qcow2`, so the
-privileged step runs once per image rather than once per VM.
+privileged step runs once per image rather than once per VM. On a cache miss the
+script copies the image into the build storage unconditionally, then asserts the
+id it landed on. A tag can exist there and still point at an older image, and a
+builder given that tag emits a disk with none of the current module code. The
+assertion turns that into a failed build instead of a disk that boots and
+fails at provisioning.
 
 ## Review Focus
 
@@ -855,11 +860,17 @@ at `build/vm/qcow2/disk.qcow2`. The builder is
 The builder refuses rootless podman, and rootful podman cannot see an image in
 the user's storage. `build-disk.sh` reads the builder from
 `${LAB_PODMAN:-podman}`, refuses rootless podman by name, and copies the image
-into that storage on a cache miss only. The qcow2 is cached at
+into that storage on every cache miss. It then compares the id in that storage
+with the id it built, and fails on a mismatch. A tag can exist there and point
+at an older image, and a builder given that tag emits a disk that boots but
+runs none of the current module code. The qcow2 is cached at
 `build/vm/cache/<role>-<image-id>.qcow2`, so the privileged step runs once per
-image and a later `lab up` needs no root. `tests/test-lab.sh` proves both paths
-with a fake `podman`: a cache hit never runs the builder, and rootless podman is
-refused.
+image and a later `lab up` needs no root. The builder writes into a fresh
+`build/vm/build-XXXXXX` directory and hands the output back with `--chown`,
+because a rootful run leaves its output root-owned and a reused path then
+cannot be cleaned. `tests/test-lab.sh` proves each path with a fake `podman`: a
+cache hit never runs the builder, rootless podman is refused, a stale build
+storage is reloaded, and a mismatched load fails.
 
 `blueprint.toml` sets the root filesystem to `xfs` and the operator user with
 the key from `lab-secrets/id_ed25519.pub`, read at build time and never

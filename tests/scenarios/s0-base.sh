@@ -13,7 +13,7 @@ assert_eq "NXDOMAIN is empty" "" "$(dig +short +time=2 @$addr absent.lab.interna
 assert_ok "cloud-init finished" ssh -i lab-secrets/id_ed25519 -o StrictHostKeyChecking=no \
   "root@$addr" 'cloud-init status --wait | grep -q "status: done"'
 assert_ok "no libvirt dnsmasq on the segment" \
-  bash -c "! pgrep -af 'dnsmasq.*ultus-s0-base'"
+  bash -c "! pgrep -af '[d]nsmasq.*ultus-s0-base'"
 lab down s0-base
 assert_ok "no domain left" bash -c "! virsh list --all --name | grep -q ultus-s0-base"
 assert_ok "seed removed"   bash -c "! test -e $RUN/s0-base/seed"

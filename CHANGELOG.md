@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - fix: the guest boots: libvirt has no `isolated` forward mode, `qemu64` lacks SSE4.2, the daemon needs absolute disk paths, and cloud-init 24.4 rejects `to: default` in network-config v2
 - fix: the node derives its zone from the seed: the owner-name rewrite now matches the bare `dns-a` token, `unbound.service` is enabled, and the base module enables `greenboot-healthcheck.service`
 - fix: the run tree can move with `LAB_RUN_DIR`, because the qemu user cannot traverse a `0700` home, and `lab doctor` names the fix
+- fix: a disk build can no longer come from a stale tag: every cache miss reloads the image into the build storage and fails on an id mismatch, and each build writes into a private output directory
 - docs: plan corrections from the consistency audit: DC-scoped DNS nodes, scenario-scoped network names, seed directory instead of an ISO, real-tree gates, host prerequisites
 - docs: operator confirms hub-and-spoke with a primary DC, a DR DC and three branches; the DR DC is evolution stage 3 and outside P0
 - docs: Task 2 creates `modules/base/` so the first image build has a `COPY modules/` source

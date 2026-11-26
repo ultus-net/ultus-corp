@@ -44,10 +44,33 @@ assert_ok    "force down leaves no domain" bash -c '! virsh list --all --name | 
 assert_ok    "force down clears state"     bash -c '! test -e run/s0-base/state.json'
 
 mkdir -p build/vm/cache
+export FAKE_IMAGE_ID=fakeimageid0000000000000000000000000000000000000000000000000000
 printf 'cached\n' > build/vm/cache/dns-fakeimageid0.qcow2
 assert_ok    "cached disk skips the builder" bash -c 'lab/build-disk.sh dns run/cache-test.qcow2'
 assert_eq    "cached disk is copied" "cached" "$(cat run/cache-test.qcow2)"
 rm -f build/vm/cache/dns-fakeimageid0.qcow2 run/cache-test.qcow2
 assert_fails "rootless podman is refused"    lab/build-disk.sh dns run/no-cache.qcow2
+
+# A tag in the build storage can be stale. The disk must come from the current
+# image, never from whatever that tag happened to hold.
+export FAKE_STORAGE_ID_FILE="$PWD/run/fake-storage-id"
+export FAKE_LOG="$PWD/run/fake-podman.log"
+printf 'stalefakeid0000\n' > "$FAKE_STORAGE_ID_FILE"
+python3 -c 'import pathlib; pathlib.Path("run/fake-podman.log").unlink(missing_ok=True)'
+build_stale() {
+  env LAB_PODMAN="env FAKE_PODMAN_STORE=rootful FAKE_PODMAN_ROOTLESS=false FAKE_STORAGE_ID_FILE=$FAKE_STORAGE_ID_FILE FAKE_LOG=$FAKE_LOG podman" \
+    lab/build-disk.sh dns run/stale-test.qcow2
+}
+assert_ok    "stale build storage is reloaded"       build_stale
+assert_ok    "the disk comes from the current image" \
+  bash -c "grep -qx \"disk from $FAKE_IMAGE_ID\" run/stale-test.qcow2"
+assert_ok    "the reload is logged" \
+  bash -c "grep -q '^save' $FAKE_LOG && grep -q '^load' $FAKE_LOG"
+
+rm -f build/vm/cache/dns-fakeimageid0.qcow2
+export FAKE_LOAD_ID=wrongid000000
+assert_fails "a mismatched load fails closed"        build_stale
+rm -f "$FAKE_STORAGE_ID_FILE" "$FAKE_LOG" run/stale-test.qcow2
+unset FAKE_LOAD_ID FAKE_STORAGE_ID_FILE FAKE_LOG
 
 finish

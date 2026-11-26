@@ -62,6 +62,12 @@ The qcow2 is cached under `build/vm/cache/<role>-<image-id>.qcow2`. A rebuilt
 image gets a new id and therefore a new disk; the old entry is dropped by
 `lab prune`.
 
+Every cache miss copies the image into the build storage before the builder
+runs, then compares the id it landed on. A tag that already existed there can
+carry an older image, and a builder fed that tag emits a disk with none of the
+new module code. The comparison turns that silent staleness into a failed
+build.
+
 ## Known gaps
 
 - The disk build needs the `bootc-image-builder` container and about 5 GiB of

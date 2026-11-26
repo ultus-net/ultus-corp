@@ -7,6 +7,9 @@ mkdir -p "$(dirname "$EVIDENCE")"
 : > "$EVIDENCE"
 export LIBVIRT_DEFAULT_URI=${LIBVIRT_DEFAULT_URI:-qemu:///system}
 RUN=${LAB_RUN_DIR:-run}
+export RUN
+PATH=$PWD/lab:$PATH
+export PATH
 . build/checks.sh
 
 record() {

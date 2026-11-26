@@ -16,7 +16,8 @@ if ! podman image exists "$image"; then
   build_role "$role"
 fi
 
-id=$(podman image inspect --format '{{.Id}}' "$image" | cut -c1-12)
+id_full=$(podman image inspect --format '{{.Id}}' "$image")
+id=${id_full:0:12}
 cache="build/vm/cache/$role-$id.qcow2"
 if [ -f "$cache" ]; then
   cp -f "$cache" "$out"
@@ -30,12 +31,18 @@ if [ "$("${podman[@]}" info --format '{{.Host.Security.Rootless}}')" = true ]; t
   exit 1
 fi
 
-if ! "${podman[@]}" image exists "$image"; then
-  echo "copying $image into the build podman storage" >&2
-  mkdir -p build/vm
-  podman save -o build/vm/image.tar "$image"
-  "${podman[@]}" load -i build/vm/image.tar
-  rm -f build/vm/image.tar
+# Always replace the tag in the build storage. A tag can exist there and still
+# carry an older image, and building from it produces a disk that silently
+# lacks the current module code.
+echo "copying $image into the build podman storage" >&2
+mkdir -p build/vm
+podman save -o build/vm/image.tar "$image"
+"${podman[@]}" load -i build/vm/image.tar
+rm -f build/vm/image.tar
+loaded=$("${podman[@]}" image inspect --format '{{.Id}}' "$image")
+if [ "$loaded" != "$id_full" ]; then
+  echo "build-disk.sh: $image loaded as $loaded, expected $id_full" >&2
+  exit 1
 fi
 
 pub=$(cat lab-secrets/id_ed25519.pub)
