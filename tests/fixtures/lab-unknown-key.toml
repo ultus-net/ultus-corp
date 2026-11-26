@@ -1,0 +1,30 @@
+[lab]
+realm = "LAB.INTERNAL"
+domain = "lab.internal"
+overlay = "10.255.0.0/16"
+
+[[site]]
+id = "br1"
+prefix = "10.11.0.0/16"
+unknown_key = "should be rejected"
+
+[[scenario]]
+id = "s1-dns"
+title = "authoritative plus recursive"
+vm_budget = 2
+ram_budget_mib = 3072
+
+[[node]]
+scenario = "s1-dns"
+name = "dns-a"
+site = "br1"
+role = "dns"
+vcpus = 1
+ram_mib = 1024
+disk_gib = 8
+
+  [[node.interface]]
+  segment = "mgmt"
+  address = "10.11.10.11"
+  gateway = "10.11.10.1"
+  nameservers = ["10.11.10.11"]
