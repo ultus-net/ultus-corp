@@ -1,0 +1,11 @@
+[Unit]
+Description=Validate the ultus-corp dns configuration
+After=named.service
+Requires=named.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/named-checkconf -z /etc/named.conf
+
+[Install]
+WantedBy=multi-user.target

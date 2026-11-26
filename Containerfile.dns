@@ -5,4 +5,6 @@ RUN --mount=type=bind,source=build/out/install-dns.txt,target=/tmp/install-list.
     dnf -y install $(cat /tmp/install-list.txt) && dnf clean all
 
 COPY modules/base/ /
+COPY modules/dns/ /
 RUN /usr/libexec/ultus-corp/build.d/00-base.sh
+RUN /usr/libexec/ultus-corp/build.d/50-dns.sh
