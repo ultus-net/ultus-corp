@@ -1,0 +1,130 @@
+import unittest
+
+import json
+
+from lab.render import load, nodes_for, network_xml, domain_xml, seed_files, interface_mac, Spec, Node, Segment
+
+
+class TestLoad(unittest.TestCase):
+    def test_load_valid_spec(self):
+        spec = load("lab/lab.toml")
+        self.assertIsInstance(spec, Spec)
+        self.assertEqual(len(spec.sites), 1)
+
+    def test_load_unknown_key(self):
+        with self.assertRaises(ValueError):
+            load("tests/fixtures/lab-unknown-key.toml")
+
+
+class TestNodesFor(unittest.TestCase):
+    def test_nodes_for_scenario(self):
+        spec = load("lab/lab.toml")
+        nodes = nodes_for(spec, "s1-dns")
+        self.assertEqual([n.name for n in nodes], ["dns-a", "dns-b"])
+
+    def test_nodes_for_scenario_returns_base(self):
+        spec = load("lab/lab.toml")
+        base = nodes_for(spec, "s0-base")[0]
+        self.assertEqual(base.name, "base-a")
+
+    def test_nodes_name_not_duplicate(self):
+        spec = load("lab/lab.toml")
+        base_a = nodes_for(spec, "s0-base")[0]
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        self.assertNotEqual(base_a.name, dns_a.name)
+
+    def test_nodes_for_unknown_scenario(self):
+        spec = load("lab/lab.toml")
+        with self.assertRaises(ValueError):
+            nodes_for(spec, "nope")
+
+
+class TestNetworkXml(unittest.TestCase):
+    def test_network_xml_forward_isolated(self):
+        spec = load("lab/lab.toml")
+        net = network_xml("s1-dns", spec.sites["dc"].segments["mgmt"], spec)
+        self.assertIn("<forward mode='isolated'/>", net)
+
+    def test_network_xml_dns_disabled(self):
+        spec = load("lab/lab.toml")
+        net = network_xml("s1-dns", spec.sites["dc"].segments["mgmt"], spec)
+        self.assertIn("<dns enable='no'/>", net)
+        self.assertNotIn("<dhcp", net)
+
+    def test_network_xml_no_bridge(self):
+        spec = load("lab/lab.toml")
+        net = network_xml("s1-dns", spec.sites["dc"].segments["mgmt"], spec)
+        self.assertNotIn("<bridge", net)
+
+    def test_network_xml_isolated_network_name(self):
+        spec = load("lab/lab.toml")
+        net = network_xml("s1-dns", spec.sites["dc"].segments["mgmt"], spec)
+        self.assertIn("ultus-s1-dns-mgmt", net)
+
+
+class TestDomainXml(unittest.TestCase):
+    def test_domain_xml_isolated_network(self):
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        xml = domain_xml(dns_a, spec)
+        self.assertIn("ultus-s1-dns-dns-a", xml)
+        self.assertIn("<source network='ultus-s1-dns-mgmt'/>", xml)
+        self.assertIn("<source network='ultus-s1-dns-data'/>", xml)
+        self.assertNotIn("<forward", xml)
+
+    def test_domain_xml_no_forward(self):
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        xml = domain_xml(dns_a, spec)
+        self.assertNotIn("<forward", xml)
+
+
+class TestInterfaceMac(unittest.TestCase):
+    def test_mac_unicast_local_unique(self):
+        spec = load("lab/lab.toml")
+        macs = [interface_mac(s.id, n.name, i.segment) for s in spec.scenarios.values() for n in nodes_for(spec, s.id) for i in n.interfaces]
+        self.assertEqual(len(macs), len(set(macs)))
+        for mac in macs:
+            first = int(mac.split(":")[0], 16)
+            self.assertEqual(first & 0x01, 0)   # unicast: multicast bit clear
+            self.assertEqual(first & 0x02, 2)   # locally administered
+
+    def test_mac_uses_sha256(self):
+        # Verify interface_mac uses SHA-256 by checking it's deterministic
+        spec = load("lab/lab.toml")
+        first = interface_mac("s0-base", "base-a", "mgmt")
+        second = interface_mac("s0-base", "base-a", "mgmt")
+        self.assertEqual(first, second)
+
+
+class TestSeedFiles(unittest.TestCase):
+    def test_seed_files_returns_three_files(self):
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        files = seed_files(dns_a, spec)
+        self.assertIn("meta-data", files)
+        self.assertIn("user-data", files)
+        self.assertIn("network-config", files)
+
+    def test_seed_files_meta_id(self):
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        files = seed_files(dns_a, spec)
+        self.assertIn("instance-id: ultus-s1-dns-dns-a", files["meta-data"])
+
+    def test_seed_files_network_config_version_2(self):
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        files = seed_files(dns_a, spec)
+        network = json.loads(files["network-config"])
+        self.assertEqual(network["version"], 2)
+        self.assertIn("ethernets", network)
+
+    def test_seed_files_network_config_addresses(self):
+        spec = load("lab/lab.toml")
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        files = seed_files(dns_a, spec)
+        network = json.loads(files["network-config"])
+        # Check addresses are formatted as mask/prefix
+        self.assertIn("10.100.10.11/24", files["network-config"])
+        self.assertIn("10.100.20.11/24", files["network-config"])

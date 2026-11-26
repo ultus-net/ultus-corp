@@ -1,0 +1,79 @@
+[lab]
+realm = "LAB.INTERNAL"
+domain = "lab.internal"
+overlay = "10.255.0.0/16"
+
+[[site]]
+id = "dc"
+prefix = "10.100.0.0/16"
+
+  [[site.segment]]
+  name = "mgmt"
+  cidr = "10.100.10.0/24"
+
+  [[site.segment]]
+  name = "data"
+  cidr = "10.100.20.0/24"
+
+[[scenario]]
+id = "s0-base"
+title = "bootable image"
+vm_budget = 1
+ram_budget_mib = 2048
+
+[[node]]
+scenario = "s0-base"
+name = "base-a"
+site = "dc"
+role = "dns"
+vcpus = 1
+ram_mib = 1024
+disk_gib = 8
+
+  [[node.interface]]
+  segment = "mgmt"
+  address = "10.100.10.20"
+  gateway = "10.100.10.1"
+  nameservers = ["10.100.10.20"]
+
+[[scenario]]
+id = "s1-dns"
+title = "authoritative plus recursive"
+vm_budget = 2
+ram_budget_mib = 3072
+
+[[node]]
+scenario = "s1-dns"
+name = "dns-a"
+site = "dc"
+role = "dns"
+vcpus = 1
+ram_mib = 1024
+disk_gib = 8
+
+  [[node.interface]]
+  segment = "mgmt"
+  address = "10.100.10.11"
+  gateway = "10.100.10.1"
+  nameservers = ["10.100.10.11"]
+
+  [[node.interface]]
+  segment = "data"
+  address = "10.100.20.11"
+  gateway = "10.100.20.1"
+  nameservers = ["10.100.10.11"]
+
+[[node]]
+scenario = "s1-dns"
+name = "dns-b"
+site = "dc"
+role = "dns"
+vcpus = 1
+ram_mib = 1024
+disk_gib = 8
+
+  [[node.interface]]
+  segment = "mgmt"
+  address = "10.100.10.12"
+  gateway = "10.100.10.1"
+  nameservers = ["10.100.10.11"]
