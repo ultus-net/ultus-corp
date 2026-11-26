@@ -165,7 +165,17 @@ def teardown(state: dict, state_file: Path) -> int:
         print(f"recover with: lab down {state['scenario']}", file=sys.stderr)
         return 2
     state_file.unlink(missing_ok=True)
+    prune_empty(state_file.parent)
     return 0
+
+
+def prune_empty(scenario_dir: Path) -> None:
+    """Drop the seed directory and the scenario directory once they are empty."""
+    for candidate in (scenario_dir / "seed", scenario_dir):
+        try:
+            candidate.rmdir()
+        except OSError:
+            pass
 
 
 def cmd_up(args: argparse.Namespace) -> int:
@@ -295,6 +305,7 @@ def cmd_down(args: argparse.Namespace) -> int:
             runstate.write(state_file, state)
         else:
             state_file.unlink(missing_ok=True)
+            prune_empty(state_file.parent)
         print(f"repaired state for {scenario}, removed {removed} resource(s)")
         return 0
 

@@ -33,6 +33,7 @@ assert_ok    "failed up leaves no domain"  bash -c '! virsh list --all --name | 
 assert_ok    "failed up leaves no state"   bash -c '! test -e run/s1-dns/state.json'
 
 assert_ok    "down removes state"          lab down s0-base
+assert_ok    "down removes the seed tree"  bash -c '! test -e run/s0-base/seed'
 assert_fails "second down is an error"     lab down s0-base
 assert_ok    "up after down succeeds"      lab up s0-base
 assert_ok    "prune refuses in-use disk"   bash -c '! lab prune --all'
