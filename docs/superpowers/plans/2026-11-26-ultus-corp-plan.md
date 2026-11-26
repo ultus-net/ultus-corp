@@ -434,6 +434,13 @@ then rejects an `NS` target with no address.
 else pulls it, and the required check queries `127.0.0.1`, so an unenabled
 resolver turns a healthy node into a failed boot.
 
+`unbound.conf` sets `chroot: ""` in its `server:` clause. The package is built
+with `/etc/unbound` as its default chroot and its unit is `Type=notify`, so the
+daemon inside that chroot cannot open `/run/systemd/notify`. It then exits at
+startup with a fatal `sd_notify` error, while `unbound-checkconf` still reports
+the file as valid. `tests/test-packages.sh` therefore asserts the effective
+chroot through `unbound-checkconf -o chroot`, not only the syntax.
+
 `ultus-provision.service` is `Type=oneshot`, `RemainAfterExit=yes`, ordered
 `Before=named.service`, and runs `provision.sh` as root.
 
@@ -441,8 +448,11 @@ resolver turns a healthy node into a failed boot.
 zone fails the boot visibly rather than inside a log.
 
 `50-dns-health.sh` queries `127.0.0.1` for `lab.internal SOA` and exits
-non-zero with the dig output when the answer is empty. It sits in `required.d`,
-so a dns image that boots but cannot answer rolls back.
+non-zero when the reply is not `NOERROR`. It reads the reply status, not the
+answer text: `dig` writes transport errors to stdout, so a non-empty answer
+would let a refused query pass. It sits in `required.d`, so a dns image that
+boots but cannot answer rolls back. `tests/test-packages.sh` runs it in the
+image with no resolver listening and expects a non-zero exit.
 
 `docs/roles/dns.md` carries the four headings and one fenced `proof` block
 holding `named-checkconf -z /etc/named.conf`. `run_role_proof` extracts that
@@ -817,17 +827,31 @@ lab up s0-base
 addr=$(python3 -c 'import json;print(json.load(open("run/s0-base/state.json"))["nodes"]["base-a"]["address"])')
 
 assert_eq "domain running" "running" "$(virsh domstate ultus-s0-base-base-a)"
-assert_ok "guest reachable" timeout 120 bash -c "until ping -c1 -W1 $addr; do sleep 2; done"
-assert_eq "name resolves to the guest" "$addr" "$(dig +short +time=2 @$addr base-a.lab.internal | tail -1)"
-assert_eq "NXDOMAIN is empty" "" "$(dig +short +time=2 @$addr absent.lab.internal)"
-assert_ok "cloud-init finished" ssh -i lab-secrets/id_ed25519 -o StrictHostKeyChecking=no \
+assert_ok "guest reachable" timeout 180 bash -c "until ping -c1 -W1 $addr; do sleep 2; done"
+# A ping proves the NIC, not the boot. Provisioning and the services start
+# after the network, so each service assertion waits for its own answer.
+assert_ok "cloud-init finished" timeout 300 ssh -i lab-secrets/id_ed25519 \
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes \
   "root@$addr" 'cloud-init status --wait | grep -q "status: done"'
+assert_ok "named answers the lab zone" timeout 120 \
+  bash -c "until dig +short +time=2 +tries=1 @$addr base-a.lab.internal | grep -q $addr; do sleep 2; done"
+assert_eq "name resolves to the guest" "$addr" "$(dig +short +time=2 +tries=1 @$addr base-a.lab.internal | tail -1)"
+assert_eq "absent name is NXDOMAIN" "NXDOMAIN" \
+  "$(dig +time=2 +tries=1 @$addr absent.lab.internal | sed -n 's/.*status: \([A-Z]*\).*/\1/p' | head -1)"
+assert_ok "the node's own health check passes" timeout 120 ssh -i lab-secrets/id_ed25519 \
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes \
+  "root@$addr" '/etc/greenboot/check/required.d/50-dns-health.sh'
 assert_ok "no libvirt dnsmasq on the segment" \
-  bash -c "! pgrep -af 'dnsmasq.*ultus-s0-base'"
+  bash -c "! pgrep -af '[d]nsmasq.*ultus-s0-base'"
 lab down s0-base
 assert_ok "no domain left" bash -c "! virsh list --all --name | grep -q ultus-s0-base"
 assert_ok "seed removed"   bash -c "! test -e run/s0-base/seed"
 ```
+
+The first run of this gate failed on service assertions taken straight after a
+ping. `cloud-init` had not finished starting `named`, so a passing ping and a
+refused query were both true. Every assertion after the ping now waits for its
+own answer, bounded by `timeout`.
 
 - [ ] **Step 2: Run test to verify it fails**
 

@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - fix: the run tree can move with `LAB_RUN_DIR`, because the qemu user cannot traverse a `0700` home, and `lab doctor` names the fix
 - fix: a disk build can no longer come from a stale tag: every cache miss reloads the image into the build storage and fails on an id mismatch, and each build writes into a private output directory
 - fix: a cache hit proves its own origin through a `<disk>.id` sidecar, so a disk stored under the wrong image id is rebuilt rather than served; `lab doctor` counts an unproven disk as uncached
+- fix: the dns node resolves its own zone: `unbound` died at startup inside the package's default `/etc/unbound` chroot, and the health check read `dig`'s error text as an answer
+- fix: the s0-base gate waits for each service, not for the NIC: a ping passed while `cloud-init` was still starting `named`
 - docs: plan corrections from the consistency audit: DC-scoped DNS nodes, scenario-scoped network names, seed directory instead of an ISO, real-tree gates, host prerequisites
 - docs: operator confirms hub-and-spoke with a primary DC, a DR DC and three branches; the DR DC is evolution stage 3 and outside P0
 - docs: Task 2 creates `modules/base/` so the first image build has a `COPY modules/` source
