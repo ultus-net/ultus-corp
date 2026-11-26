@@ -306,9 +306,11 @@ the bootc unit is present. `COPY modules/base/ /` copies the tree's contents ont
 `/`. Task 3 adds `COPY modules/dns/ /` beside it.
 
 `build/package-lock.sh resolve <role>` builds the image, then writes
-`podman run --rm "$(lab_image "$role")" rpm -qa --qf '%{NAME}-%{EVR}.%{ARCH}\n' | sort`
-to the lock file. When a lock exists, `Containerfile.<role>` installs
-`$(cat /tmp/packages.lock)` so the NEVRAs are pinned.
+`podman run --rm "$(lab_image "$role")" rpm -qa --qf '%{NAME}-%{EVR}.%{ARCH}\n' | grep -v '^gpg-pubkey-' | sort`
+to the lock file. The filter matters: `rpm -qa` lists `gpg-pubkey` pseudo-packages
+but `dnf install` cannot resolve them, so an unfiltered lock breaks the next
+build. When a lock exists, `Containerfile.<role>` installs `$(cat /tmp/packages.lock)`
+so the NEVRAs are pinned.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -388,20 +390,22 @@ Expected: FAIL, `bind installed: package bind is not installed`.
 `50-dns.sh` runs `systemctl enable ultus-provision.service ultus-dns-ready.service`
 and asserts both are enabled, exiting non-zero with the unit name on failure.
 
-`lab.internal.zone` is created here, not in a later task: a primary with `SOA`
-and `NS`, and no host record. A build-time `A` record would carry one run's
-address into every image, so `provision.sh` appends this node's own `A` record
-at boot. `named.conf` serves the zone from `/var/named/lab.internal.zone` and
+`lab.internal.zone` is created here, not in a later task: a primary with `SOA`,
+`NS`, and one placeholder `A` record for `dns-a` on `127.0.0.2`. The placeholder
+is what makes `named-checkconf -z` load the zone at build time, because `BIND`
+refuses an `NS` target with no address. `provision.sh` rewrites the owner name
+and the address to the booted node's own, so no run's address is baked into an
+image. `named.conf` serves the zone from `/var/named/lab.internal.zone` and
 forwards nothing. `unbound.conf` listens on loopback and forwards
-`lab.internal` to `127.0.0.1`. Both are the single-node default, valid at
+`lab.internal` to `127.0.0.2`. Both are the single-node default, valid at
 build time.
 
 `provision.sh` reads `/run/ultus-corp/node.json` and specialises that default:
-it rewrites the forwarder to the primary address, and when the node carries a
-`secondary` field it writes a `type secondary` stanza with `masters` and
-`allow-transfer` instead of the primary stanza. It then runs
-`named-checkconf`. It is the only place node-specific configuration is
-produced, because build time cannot see the seed.
+it rewrites the listen address, the forwarder, and the zone's owner name and
+address. When the node carries a `secondary` field it writes a `type secondary`
+stanza with `masters` and `allow-transfer` instead of the primary stanza. It
+then runs `named-checkconf`. It is the only place node-specific configuration is
+produced, because build time cannot see the seed. The rewrite is idempotent.
 
 `ultus-provision.service` is `Type=oneshot`, `RemainAfterExit=yes`, ordered
 `Before=named.service`, and runs `provision.sh` as root.
@@ -433,9 +437,10 @@ from Stream 10. Rebuild with the lock present, then prove the lock is what got
 installed:
 
 ```bash
-bash -c '. build/common.sh && build_role dns'
-diff <(podman run --rm "$(lab_image dns)" rpm -qa --qf '%{NAME}-%{EVR}.%{ARCH}\n' | sort) \
-     manifests/packages-dns.lock
+. build/common.sh && build_role dns
+podman run --rm localhost/ultus-corp/dns:local rpm -qa --qf '%{NAME}-%{EVR}.%{ARCH}\n' \
+  | grep -v '^gpg-pubkey-' | sort > run/dns-installed.txt
+diff run/dns-installed.txt manifests/packages-dns.lock
 ```
 
 Expected: no output. Record the commands and the date in
@@ -656,7 +661,10 @@ git commit -m "feat: typed lab.toml spec, isolated networks and NoCloud seed"
 - Create: `tests/test-lab.sh`
 
 **Interfaces:**
-- Consumes: `render.py` from Task 4, `build-disk.sh` from Task 6.
+- Consumes: `render.py` from Task 4, and `lab/build-disk.sh` from Task 6 through
+  `${LAB_DISK_BUILDER:-lab/build-disk.sh}`. Until Task 6 lands, a test sets
+  `LAB_DISK_BUILDER` to a fake that writes a small file, so `up` needs no
+  libvirt and no image-builder on this host.
 - Produces: `lab up <scenario>`, `lab down <scenario>`, `lab status`,
   `lab test <scenario>`, `lab doctor`, `lab egress on|off`, `lab prune`.
 - Produces: `run/<scenario>/state.json` with schema 1:
@@ -666,15 +674,19 @@ git commit -m "feat: typed lab.toml spec, isolated networks and NoCloud seed"
   "schema": 1,
   "scenario": "s1-dns",
   "owner": "6f6c1f9e-…",
-  "nodes": {"dns-a": {"address": "10.11.10.11", "domain": "ultus-s1-dns-dns-a"}},
+  "nodes": {"dns-a": {"address": "10.100.10.11", "domain": "ultus-s1-dns-dns-a"}},
   "resources": [
     {"kind": "network", "name": "ultus-s1-dns-mgmt"},
-    {"kind": "seed", "name": "ultus-s1-dns-dns-a-seed.iso", "mode": "0600"},
+    {"kind": "seed", "name": "ultus-s1-dns-dns-a-seed", "mode": "0700"},
     {"kind": "volume", "name": "ultus-s1-dns-dns-a.qcow2"},
     {"kind": "domain", "name": "ultus-s1-dns-dns-a"}
   ]
 }
 ```
+
+- Produces: `run/<scenario>/seed/<node>/` holding `meta-data`, `user-data` and
+  `network-config`, directory mode `0700`, files `0600`. The ISO is built later,
+  by the disk path that Task 6 adds.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -687,7 +699,8 @@ assert_ok    "up records state"           lab up s0-base
 assert_ok    "state is schema 1"          python3 -c 'import json,sys; d=json.load(open("run/s0-base/state.json")); sys.exit(d["schema"] != 1)'
 assert_ok    "up is idempotent"           lab up s0-base
 assert_ok    "status lists the scenario"  lab status
-assert_ok    "seed is 0600"               bash -c '[ "$(stat -c %a run/s0-base/seed)" = 600 ]'
+assert_ok    "seed is 0700"               bash -c '[ "$(stat -c %a run/s0-base/seed)" = 700 ]'
+assert_ok    "seed file is 0600"          bash -c '[ "$(stat -c %a run/s0-base/seed/base-a/meta-data)" = 600 ]'
 assert_fails "failed up exits non-zero"   bash -c 'VIRSH_FAIL_ON=3 lab up s1-dns'
 assert_ok    "failed up leaves no domain" bash -c '! virsh list --all --name | grep -q ultus-s1-dns'
 assert_ok    "down removes state"         lab down s0-base
@@ -697,8 +710,9 @@ assert_ok    "prune refuses in-use disk"  bash -c 'lab up s0-base && ! lab prune
 ```
 
 A separate case deletes `run/s0-base/state.json` while the fake `virsh` still
-reports the domain, then asserts `lab down s0-base --force` removes names
-matching `ultus-s0-base-*`, prints a warning, and repairs the state file.
+reports the domain, then asserts `lab down s0-base --force` removes only the
+names the spec derives for that scenario, prints a warning, and clears the state
+file when nothing remains.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -708,10 +722,12 @@ Expected: FAIL, `lab: No such file or directory`.
 - [ ] **Step 3: Implement the CLI**
 
 `lab` is a Python 3 script with no third-party imports. `up` runs render, then
-creates network, seed, volume and domain in that order. Each resource is
-appended to `state.json` through `state.py`, which writes a temp file, fsyncs
-and renames, so the record is never half-written. Node addresses come from the
-same spec, so `state.json` never invents one.
+creates network, seed, volume and domain in that order. Before the volume it
+calls `${LAB_DISK_BUILDER:-lab/build-disk.sh}`, so the test substitutes a fake
+and this task needs no libvirt. Each resource is appended to `state.json`
+through `state.py`, which writes a temp file, fsyncs and renames, so the record
+is never half-written. Node addresses come from the same spec, so `state.json`
+never invents one.
 
 The failure contract is explicit. If any create fails, `up` tears down from
 recorded state. If a delete then fails, `up` keeps `state.json`, prints the
@@ -719,9 +735,12 @@ retained resources, exits 2, and names `lab down <scenario>` as the recovery
 step. A cleanup that cannot finish is never reported as clean.
 
 `down` removes in reverse order from state. With no state file it refuses,
-unless `--force` is passed, in which case it matches `ultus-<scenario>-*` and
-prints each inferred name before deleting it. `s1` is not a scenario id, so the
-prefix cannot collide with `s1-dns`.
+unless `--force` is passed. `--force` first validates the id against the spec and
+exits non-zero for an unknown one, so `s1` is refused before any match. It then
+deletes only names the spec derives for that scenario: `ultus-<scenario>-<node>`
+and `ultus-<scenario>-<segment>`. A prefix match alone would make
+`ultus-s1-*` delete every `ultus-s1-dns-*` resource. When nothing remains it
+clears the state file, so a later `up` is not told the scenario is already up.
 
 `doctor` checks `/dev/kvm`, `virsh`, `qemu-img`, `xorriso` or `genisoimage`,
 Python 3.11 or newer, free disk against the scenario budget, and the 20 GiB

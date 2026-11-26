@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""Bring one bounded lab scenario up, record it, and take it down again."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+
+import render  # noqa: E402
+import state as runstate  # noqa: E402
+
+RUN = ROOT / "run"
+SPEC = ROOT / "lab" / "lab.toml"
+
+
+def virsh(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["virsh", *args], capture_output=True, text=True, cwd=ROOT)
+
+
+def names(*args: str) -> list[str]:
+    done = virsh(*args)
+    return [line.strip() for line in done.stdout.splitlines() if line.strip()]
+
+
+def fail(message: str, code: int = 1) -> "None":
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_spec() -> render.Spec:
+    try:
+        return render.load(SPEC)
+    except ValueError as exc:
+        fail(f"spec error: {exc}")
+
+
+def scenario_segments(spec: render.Spec, scenario: str) -> list[render.Segment]:
+    seen: dict[str, render.Segment] = {}
+    for node in render.nodes_for(spec, scenario):
+        site = spec.sites[node.site]
+        for iface in node.interfaces:
+            seen.setdefault(iface.segment, site.segments[iface.segment])
+    return list(seen.values())
+
+
+def create_seed(node: render.Node, spec: render.Spec, run_dir: Path) -> Path:
+    node_dir = run_dir / "seed" / node.name
+    node_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(run_dir / "seed", 0o700)
+    os.chmod(node_dir, 0o700)
+    for name, content in render.seed_files(node, spec).items():
+        target = node_dir / name
+        target.write_text(content, encoding="utf-8")
+        os.chmod(target, 0o600)
+    return node_dir
+
+
+def disk_builder() -> Path:
+    configured = os.environ.get("LAB_DISK_BUILDER")
+    if configured:
+        return Path(configured)
+    return ROOT / "lab" / "build-disk.sh"
+
+
+def build_disk(role: str, target: Path) -> None:
+    builder = disk_builder()
+    if not builder.is_file():
+        fail(
+            f"no disk builder at {builder}; Task 6 provides it, "
+            "or set LAB_DISK_BUILDER"
+        )
+    done = subprocess.run(
+        [str(builder), role, str(target)], cwd=ROOT, capture_output=True, text=True
+    )
+    if done.returncode != 0:
+        raise RuntimeError(f"disk builder failed: {done.stderr.strip()}")
+
+
+def delete(resource: dict) -> None:
+    kind = resource["kind"]
+    name = resource["name"]
+    if kind == "domain":
+        virsh("destroy", name)
+        done = virsh("undefine", name)
+        if done.returncode != 0:
+            raise RuntimeError(f"cannot undefine {name}: {done.stderr.strip()}")
+    elif kind == "network":
+        virsh("net-destroy", name)
+        done = virsh("net-undefine", name)
+        if done.returncode != 0:
+            raise RuntimeError(f"cannot undefine {name}: {done.stderr.strip()}")
+    elif kind in {"volume", "seed"}:
+        target = ROOT / resource["path"]
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            target.unlink(missing_ok=True)
+    else:
+        raise RuntimeError(f"unknown resource kind {kind}")
+
+
+def teardown(state: dict, state_file: Path) -> int:
+    remaining = []
+    for resource in reversed(state["resources"]):
+        try:
+            delete(resource)
+            runstate.drop(state, resource["kind"], resource["name"])
+            runstate.write(state_file, state)
+        except Exception as exc:  # noqa: BLE001 - the message is the report
+            remaining.append(f"{resource['kind']} {resource['name']}: {exc}")
+            break
+    if remaining:
+        runstate.write(state_file, state)
+        print("retained resources:", file=sys.stderr)
+        for line in remaining:
+            print(f"  {line}", file=sys.stderr)
+        print(f"state kept at {state_file}", file=sys.stderr)
+        print(f"recover with: lab down {state['scenario']}", file=sys.stderr)
+        return 2
+    state_file.unlink(missing_ok=True)
+    return 0
+
+
+def cmd_up(args: argparse.Namespace) -> int:
+    spec = load_spec()
+    scenario = args.scenario
+    try:
+        nodes = render.nodes_for(spec, scenario)
+    except ValueError as exc:
+        fail(str(exc))
+
+    state_file = runstate.state_path(RUN, scenario)
+    if state_file.exists():
+        print(f"{scenario} is already up")
+        return 0
+
+    run_dir = RUN / scenario
+    render_dir = run_dir / "render"
+    render_dir.mkdir(parents=True, exist_ok=True)
+    state = runstate.new(scenario)
+    for node in nodes:
+        state["nodes"][node.name] = {
+            "address": node.interfaces[0].address,
+            "domain": f"ultus-{scenario}-{node.name}",
+        }
+    runstate.write(state_file, state)
+
+    try:
+        for segment in scenario_segments(spec, scenario):
+            name = f"ultus-{scenario}-{segment.name}"
+            xml = render_dir / f"{scenario}-{segment.name}.network.xml"
+            xml.write_text(render.network_xml(scenario, segment, spec), encoding="utf-8")
+            done = virsh("net-define", str(xml))
+            if done.returncode != 0:
+                raise RuntimeError(f"net-define {name}: {done.stderr.strip()}")
+            runstate.add(state, "network", name)
+            runstate.write(state_file, state)
+            done = virsh("net-start", name)
+            if done.returncode != 0:
+                raise RuntimeError(f"net-start {name}: {done.stderr.strip()}")
+
+        for node in nodes:
+            seed_dir = create_seed(node, spec, run_dir)
+            runstate.add(
+                state,
+                "seed",
+                f"ultus-{scenario}-{node.name}-seed",
+                path=str(seed_dir.relative_to(ROOT)),
+                mode="0700",
+            )
+            runstate.write(state_file, state)
+
+            volume = run_dir / f"ultus-{scenario}-{node.name}.qcow2"
+            build_disk(node.role, volume)
+            runstate.add(
+                state,
+                "volume",
+                volume.name,
+                path=str(volume.relative_to(ROOT)),
+            )
+            runstate.write(state_file, state)
+
+            xml = render_dir / f"{node.name}.xml"
+            xml.write_text(render.domain_xml(node, spec), encoding="utf-8")
+            done = virsh("define", str(xml))
+            if done.returncode != 0:
+                raise RuntimeError(f"define {node.name}: {done.stderr.strip()}")
+            runstate.add(state, "domain", f"ultus-{scenario}-{node.name}")
+            runstate.write(state_file, state)
+            done = virsh("start", f"ultus-{scenario}-{node.name}")
+            if done.returncode != 0:
+                raise RuntimeError(f"start {node.name}: {done.stderr.strip()}")
+    except Exception as exc:  # noqa: BLE001 - teardown reports the rest
+        print(f"up failed: {exc}", file=sys.stderr)
+        code = teardown(state, state_file)
+        return max(code, 1) if code else 1
+
+    print(f"{scenario} is up: {', '.join(node.name for node in nodes)}")
+    return 0
+
+
+def force_names(spec: render.Spec, scenario: str) -> list[tuple[str, str]]:
+    """Only names the spec derives, never a bare prefix match."""
+    nodes = render.nodes_for(spec, scenario)
+    found = [("domain", node.name) for node in nodes]
+    found += [("network", segment.name) for segment in scenario_segments(spec, scenario)]
+    return found
+
+
+def cmd_down(args: argparse.Namespace) -> int:
+    spec = load_spec()
+    scenario = args.scenario
+    state_file = runstate.state_path(RUN, scenario)
+
+    if not state_file.exists():
+        if not args.force:
+            fail(f"no state for {scenario}; refusing to guess")
+        try:
+            expected = force_names(spec, scenario)
+        except ValueError as exc:
+            fail(str(exc))
+        state = runstate.new(scenario)
+        removed = 0
+        live_domains = set(names("list", "--all", "--name"))
+        live_networks = set(names("net-list", "--all", "--name"))
+        for kind, short in expected:
+            full = f"ultus-{scenario}-{short}"
+            live = live_domains if kind == "domain" else live_networks
+            if full not in live:
+                continue
+            print(f"warning: inferred {kind} {full} from the spec", file=sys.stderr)
+            delete({"kind": kind, "name": full})
+            removed += 1
+        if state["resources"]:
+            runstate.write(state_file, state)
+        else:
+            state_file.unlink(missing_ok=True)
+        print(f"repaired state for {scenario}, removed {removed} resource(s)")
+        return 0
+
+    state = runstate.read(state_file)
+    code = teardown(state, state_file)
+    if code == 0:
+        print(f"{scenario} is down")
+    return code
+
+
+def cmd_status(_: argparse.Namespace) -> int:
+    if not RUN.is_dir():
+        print("no scenarios are up")
+        return 0
+    found = False
+    for state_file in sorted(RUN.glob("*/state.json")):
+        state = runstate.read(state_file)
+        found = True
+        print(f"{state['scenario']}  owner {state['owner']}  {len(state['nodes'])} node(s)")
+    if not found:
+        print("no scenarios are up")
+    return 0
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    script = ROOT / "tests" / "scenarios" / f"{args.scenario}.sh"
+    if not script.is_file():
+        fail(f"no scenario test at {script}")
+    return subprocess.run(["bash", str(script)], cwd=ROOT).returncode
+
+
+def cmd_doctor(_: argparse.Namespace) -> int:
+    problems = []
+    if sys.version_info < (3, 11):
+        problems.append("python 3.11 or newer")
+    if not Path("/dev/kvm").exists():
+        problems.append("/dev/kvm")
+    for tool in ("virsh", "qemu-img"):
+        if shutil.which(tool) is None:
+            problems.append(tool)
+    if shutil.which("xorriso") is None and shutil.which("genisoimage") is None:
+        problems.append("xorriso or genisoimage")
+    free = shutil.disk_usage(ROOT).free
+    if free < 10 * 1024**3:
+        problems.append("10 GiB free disk")
+    if problems:
+        print("missing: " + ", ".join(problems), file=sys.stderr)
+        return 1
+    print("host looks ready")
+    return 0
+
+
+def cmd_prune(args: argparse.Namespace) -> int:
+    live = set(names("list", "--all", "--name"))
+    for state_file in RUN.glob("*/state.json"):
+        for resource in runstate.read(state_file)["resources"]:
+            if resource["kind"] == "domain" and resource["name"] in live:
+                print(f"refusing: {resource['name']} is running", file=sys.stderr)
+                return 1
+    cache = ROOT / "build" / "out"
+    if cache.is_dir():
+        shutil.rmtree(cache)
+    print("pruned unused build output")
+    return 0
+
+
+def cmd_egress(args: argparse.Namespace) -> int:
+    spec = load_spec()
+    try:
+        nodes = render.nodes_for(spec, args.scenario)
+    except ValueError as exc:
+        fail(str(exc))
+    if not any(node.role == "hub" for node in nodes):
+        fail(f"{args.scenario} has no hub node; egress is a hub-only toggle")
+    name = f"ultus-{args.scenario}-egress"
+    if args.state == "on":
+        xml = RUN / args.scenario / "render" / f"{name}.network.xml"
+        xml.parent.mkdir(parents=True, exist_ok=True)
+        xml.write_text(
+            "<network>\n"
+            f"  <name>{name}</name>\n"
+            "  <forward mode='nat'/>\n"
+            "  <bridge name='virbr-ultus'/>\n"
+            "  <ip address='10.255.255.1' prefix='24'/>\n"
+            "</network>\n",
+            encoding="utf-8",
+        )
+        virsh("net-define", str(xml))
+        virsh("net-start", name)
+    else:
+        virsh("net-destroy", name)
+        virsh("net-undefine", name)
+    print(f"egress {args.state} for {args.scenario}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="lab")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    up = sub.add_parser("up")
+    up.add_argument("scenario")
+    up.set_defaults(func=cmd_up)
+
+    down = sub.add_parser("down")
+    down.add_argument("scenario")
+    down.add_argument("--force", action="store_true")
+    down.set_defaults(func=cmd_down)
+
+    sub.add_parser("status").set_defaults(func=cmd_status)
+
+    test = sub.add_parser("test")
+    test.add_argument("scenario")
+    test.set_defaults(func=cmd_test)
+
+    sub.add_parser("doctor").set_defaults(func=cmd_doctor)
+    prune = sub.add_parser("prune")
+    prune.add_argument("--all", action="store_true")
+    prune.set_defaults(func=cmd_prune)
+
+    egress = sub.add_parser("egress")
+    egress.add_argument("state", choices=["on", "off"])
+    egress.add_argument("scenario")
+    egress.set_defaults(func=cmd_egress)
+
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
