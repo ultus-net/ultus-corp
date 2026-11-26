@@ -240,6 +240,39 @@ library, so the renderer needs no dependency at all.
 | D17 | Endpoint management | Fleet for inventory and policy, PXE for Linux and WinPE, macOS by profile | One plane for a mixed fleet, and onboarding from blank | Intune, which needs Entra; client VMs only, which leaves onboarding manual |
 | D18 | 802.1X authenticator | `hostapd` with the wired driver on the users bridge | Gives real supplicants a real authenticator, not just `eapol_test` | `eapol_test` only, which proves the server and nothing else |
 | D19 | Integration evidence | A static interface-composition check plus a dated assembly run | Composition is checked continuously where it can be, and sampled where it cannot | Assuming a green scenario proves the network |
+| D20 | Rollback contract | The OS rolls back; a stateful role restores. Stateless and config-only roles roll back by deployment; the 12 stateful roles are forward-only with a pre-upgrade snapshot and a restore test | `/var` persists across deployments, and NetBox and Keycloak do not support a schema downgrade. Older binaries against newer data is an outage, not a rollback | Treating `bootc rollback` as a data rollback |
+| D21 | Update plane | One update plane. The image pins every Quadlet container by digest, no unit sets `AutoUpdate=registry`, and the auto-update timer is masked | A second update plane makes "the image is the unit of build and test" false for the roles that use Quadlet | Independent container auto-update |
+
+## Configuration and deployment inputs
+
+Configuration is a versioned artifact. The repository holds the templates, the
+value schema and the non-secret values. The image holds what every host of a
+role shares. Deployment supplies what differs per host, exactly once. Nothing
+converges host state after deployment.
+
+| Layer | Owns | Home | Changes on |
+| --- | --- | --- | --- |
+| Source | templates, value schema, non-secret values, manifests, tests | this repository | a reviewed commit |
+| Image | packages, `/usr`, static config, units, container digests | the image digest | a build |
+| Deployment | hostname, addresses, keys, site values | `/etc` and the NoCloud seed | host creation or re-creation |
+| Runtime | users, DNS records, realms, reservations | the service API | an operator decision |
+
+Rules:
+
+1. A change that would make two hosts from the same digest differ in `/usr`
+   belongs in the image.
+2. A per-instance value is declared in `lab/lab.toml` or `lab-secrets/`,
+   rendered once, and never edited on the host.
+3. The seed carries identity only: hostname, network, keys and an enrolment
+   token. It carries no package installs and no service configuration.
+   `cloud-init` uses once-per-instance modules only; `always` modules are
+   banned.
+4. A role that needs a first-boot install ships an idempotent, fail-closed
+   oneshot unit. The unit writes `/etc` and `/var`; the image supplies the
+   package. FreeIPA, step-ca, OpenBao and Fleet are in this class.
+5. Nothing re-applies configuration on a running host. A drifted host is
+   re-rendered from the repository or replaced.
+6. Runtime automation may change API objects only, never host files.
 
 ## Target architecture
 
@@ -418,6 +451,7 @@ The split is deliberate and worth stating before someone copies the wrong half.
 | --- | --- |
 | High availability | Every role is a single instance. A critical role needs a pair, and pair behaviour is untested. |
 | Vendor switch and AP layer | 802.1X on real ports, DHCP snooping, relay on the access switch. The lab proves the server side only. |
+| Server install medium | A real rebuild needs a bootc install medium for bare metal, either a `bootc-image-builder` ISO or `bootc install to-filesystem`. The lab proves the qcow2 path only. |
 | Scale | Four VMs show the shape. They do not find the limit at forty branches. |
 | Operations | No on-call, no paging, no change control, no backup window. |
 
@@ -462,6 +496,12 @@ docs/                           design, plans, runbooks
 8. Supply chain: trivy, SBOM, cosign keyless.
 9. Isolation: a test asserts no libvirt network forwards to the host LAN and
    that the lab ranges do not overlap the host's.
+10. Drift: every scenario asserts `bootc status --json` reports the expected
+    digest and `ostree admin config-diff` is empty for managed paths.
+11. Idempotence: a second boot of the same deployment applies nothing and
+    leaves the digest unchanged.
+12. Rollback: a stateless role returns to the previous deployment, and a
+    stateful role restores from its pre-upgrade snapshot.
 
 ## Secrets and trust
 
@@ -528,6 +568,7 @@ Two consequences, both already reflected in the plan:
 | Integration evidence is sampled | A cross-component breakage survives a green scenario | The interface-composition gate plus a dated assembly run |
 | The third branch never runs | A three-branch interaction is never observed | `assembly-branches` proves two branches plus the hub, and the third stays spec-tested and documented |
 | Teardown leaks state | A stale network or volume breaks the next scenario | The teardown gate, which re-runs `up` after `down` |
+| Stateful rollback runs older binaries | A rollback boots a previous image against data written by the newer one | D20: the 12 stateful roles are forward-only, with a snapshot and a restore test |
 | libvirt tooling absent | s0 cannot start | Install libvirt, `virt-install` and a seed ISO tool, then prove one guest boots |
 | `hostapd` wired driver is unproven here | Real supplicants cannot complete 802.1X | Verify it in s6 before the endpoint gate; `eapol_test` remains the server proof |
 | EAP-TLS is not the vendor recipe | A Windows supplicant may fail where EAP-TTLS would pass | s6 proves EAP-TLS with a real supplicant, and EAP-TTLS plus LDAP is the documented fallback |
