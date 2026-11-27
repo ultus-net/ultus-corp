@@ -283,7 +283,9 @@ Rules:
    supplied inputs. It never runs a `lab` template. Deployment ends when
    `cloud-init` and `ultus-role-install.target` both report success; before that
    the host is not in service.
-6. The seed carries a `deployment_id` in `meta-data`. `cloud-init` writes it to
+6. The seed carries a `deployment_id` in `meta-data`. The renderer generates it
+   as a lowercase UUIDv4 with hyphens and no other characters, so it is always a
+   valid systemd instance name. `cloud-init` writes it to
    `/run/ultus-corp/deployment-id` and enables
    `ultus-deploy-finalize@<id>.service`. That template is ordered after
    `cloud-final.service` and `ultus-role-install.target`, and before
@@ -324,7 +326,7 @@ can hold a durable store and a rebuildable one.
 | fleet | rebuildable | Fleet enrolment re-establishes; policies are in the repo |
 | deploy | rebuildable | artifacts re-sync from upstream |
 | print | rebuildable | the spool is re-queued; printer configuration is rendered |
-| ipam | rebuildable | NetBox content is declared in `lab.toml`; ad-hoc objects are not durable |
+| ipam | rebuildable | NetBox projects the address plan in `lab.toml` for consumers; objects typed into NetBox are not durable |
 | pki | durable | CA keys and issued material |
 | ipa | durable | directory and Kerberos keys |
 | secrets | durable | OpenBao storage and unseal material |
@@ -474,7 +476,7 @@ enablement.
 | s7-delivery | Registry mirror, egress toggle, pull-through | A guest pulls an image through the hub with egress off, and egress on only for updates |
 | s8-observe | Prometheus, Loki, Grafana, OpenBao | Every role in the scenario emits metrics and logs, and a secret rotates without a rebuild |
 | s9-endpoints | Fleet, PXE, WinPE, a Windows client | A blank VM PXE-boots to an installer, Fleet shows the client, and Windows trusts the root and completes EAP-TLS |
-| s10-stateful | Print, file, IPAM | Print survives a node loss, IPAM is the address source of truth, and a backup restores |
+| s10-stateful | Print, file, IPAM | Print survives a node loss, IPAM serves the address plan from the repository, and a Samba share restores from backup |
 | assembly-min | Every role that the minimum topology needs, at once | Hub, branch 1, identity and one client work together, and an OIDC login crosses all of them |
 | assembly-branches | Branches 2 and 3 added as spec entries | Adding branch 3 is one spec entry and one address block, and cutting a branch overlay leaves it resolving, leasing and telling time |
 
@@ -588,9 +590,12 @@ docs/                           design, plans, runbooks
     not satisfied until every class has run.
 13. Reproducibility: the build consumes a lock of resolved NEVRA versions, and a
     package transaction outside the lock fails the build.
-14. Rebuild: a scenario destroys `/var` on one host and re-runs deployment. Every
-    rebuildable store returns to service, and the loss matches the declared list.
-    A durable store comes back only from its backup.
+14. Rebuild: on one selected host, each rebuildable store declares a recovery
+    source and a machine-checkable expected-loss inventory. The gate verifies
+    every durable backup on that host restores first, destroys the host's
+    `/var`, re-runs deployment, and asserts each rebuildable store returns to
+    service with exactly its declared loss. Stores on other hosts are out of
+    scope for this gate.
 
 ## Secrets and trust
 
@@ -665,7 +670,7 @@ Two consequences, both already reflected in the plan:
 | libvirt tooling absent | s0 cannot start | Install libvirt, `virt-install` and a seed ISO tool, then prove one guest boots |
 | `hostapd` wired driver is unproven here | Real supplicants cannot complete 802.1X | Verify it in s6 before the endpoint gate; `eapol_test` remains the server proof |
 | EAP-TLS is not the vendor recipe | A Windows supplicant may fail where EAP-TTLS would pass | s6 proves EAP-TLS with a real supplicant, and EAP-TTLS plus LDAP is the documented fallback |
-| Fleet Windows enrolment is uneven | Windows shows no inventory | Verify manual enrolment early; the Windows evidence is certificate trust and EAP-TLS, not inventory |
+| Fleet Windows enrolment is uneven | Windows does not appear in Fleet | Verify manual enrolment early; the s9 gate requires inventory before the Windows certificate test, and workstation MDM stays out of scope |
 | Windows PXE is WinPE, not Autopilot | The onboarding story differs from a real estate | Record the gap in the endpoint runbook |
 | FreeIPA and BIND fight over a zone | Duplicate or missing records | FreeIPA owns `ipa.lab.internal`; BIND delegates it |
 | FreeIPA install needs working DNS and clock | A failed install on first boot | Order s1 before s5, and assert clock and forwarders |

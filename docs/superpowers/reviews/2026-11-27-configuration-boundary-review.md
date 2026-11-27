@@ -114,12 +114,14 @@ persists across deployments, and the bootc filesystem documentation says a
 rollback "should not affect this application data".
 
 The smaller durable set is what needs care: CA keys and issued material, the
-FreeIPA directory, OpenBao storage, Samba shares, and Gitea repositories. A schema
-downgrade is not a safe assumption there: NetBox migrations are not guaranteed
-reversible, and Keycloak reports that a downgraded server cannot use an upgraded
-schema. A filesystem snapshot is also not an application-consistent backup, and
-the draft does not say in what order a restore runs or which image it restores
-into.
+FreeIPA directory, OpenBao storage, Samba shares, and Gitea repositories. The
+rebuildable stores dodge the schema problem by design: NetBox migrations are not
+guaranteed reversible and Keycloak reports that a downgraded server cannot use an
+upgraded schema, so those stores are wiped and re-created rather than rolled
+back. The durable stores assume no supported downgrade either, so the backup is
+the rollback. A filesystem snapshot is also not an application-consistent backup,
+and the draft does not say in what order a restore runs or which image it
+restores into.
 
 Change: a class per data store, not per role. Durable stores quiesce, back up
 with the application's own tool, and restore into the matching image. Rebuildable
@@ -299,7 +301,7 @@ aspirational:
 | Task 3, `Containerfile.dns` | Consume the resolved NEVRA lock instead of `packages.txt` |
 | Task 4, renderer | Render per-role configuration, and write a `deployment_id` into `meta-data` and the seed manifest |
 | Task 5, `lab` CLI | Eject and delete the seed when `ultus-deploy-ready` is reached, record it as consumed, and let teardown tolerate its absence |
-| Task 6, `s0-base` | Ship `ultus-deploy-finalize.service` and `ultus-deploy-ready.target`; gate 11 reads `deployment.json` |
+| Task 6, `s0-base` | Ship `ultus-deploy-finalize@.service` and `ultus-deploy-ready.target`; gate 11 reads the id-keyed records under `/var/lib/ultus-corp/deployments/` |
 | Task 7, `s1-dns` | Render `also-notify` and `allow-transfer` at deploy; move `lab.internal.zone` out of `/var` |
 | Task 8, CI | Wire gates 10 to 14, including the negative hand-edit test, the lock check and the rebuild scenario |
 | First Quadlet role, s5 `app` | Preload the bound images and add the cold boot with egress off |
