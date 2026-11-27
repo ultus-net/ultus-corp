@@ -33,12 +33,15 @@ one-off disk build, which is why the disk is cached per image id.
 The measurement command is:
 
 ```bash
-/usr/bin/time -v bash tests/scenarios/s1-dns.sh
+python3 lab/measure.py bash tests/scenarios/s1-dns.sh
 ```
 
-The numbers stay unset until that run. An estimate is not evidence. The
-deployment-contract change replaced the role image, so the cached disks on this
-host predate it and the next run needs one rootful disk build first.
+`measure.py` reports wall seconds, the sampled peak RSS of the qemu processes
+(the guest footprint), and the peak RSS of the harness's own children. GNU time
+is not required. The numbers stay unset until that run. An estimate is not
+evidence. The deployment-contract change replaced the role image, so the cached
+disks on this host predate it and the next run needs one rootful disk build
+first.
 
 ## Deployment contract
 
@@ -50,7 +53,7 @@ without blocking.
 | Unit | Contract |
 | --- | --- |
 | `ultus-role-install.target` | every image ships it, empty unless the role adds an installer |
-| `ultus-provision.service` | role installer, `Before=` the role target and the vendor services |
+| `ultus-provision.service` | role installer, `Before=` the role target; it restarts the vendor services itself, so it is not ordered against them |
 | `ultus-deploy-finalize@.service` | runs after `cloud-final` and the role target, once per id |
 | `ultus-deploy-ready.target` | started by `cloud-final` after the instance is enabled, so it pulls it in |
 
@@ -75,6 +78,17 @@ the option into a harness that reaches a persistent host.
 `50-dns-health.sh` is a required greenboot check. A failing required check keeps
 `boot-complete.target` from being reached, and greenboot rolls the host back to
 the previous deployment after `GREENBOOT_MAX_BOOT_ATTEMPTS`.
+
+The vendor unit is pulled into the `multi-user.target` transaction, and
+cloud-init's final stage is ordered after `multi-user.target`. Ordering the check
+after `cloud-final.service` therefore builds a cycle, and systemd deletes the
+check job: a green boot then passes unproven. The check reads the durable record
+instead. With no record under `/var/lib/ultus-corp/deployments`, the first boot
+has not been provisioned yet and is not judged. With records present the host has
+been in service, so the zone check runs. A delivered deployment id with no record
+is an unfinished deployment, and the check waits for it and then fails closed.
+The harness still proves the deployment, because `lab up` waits for the record
+and fails when it never arrives.
 
 `tests/scenarios/greenboot-rollback.sh` builds a throwaway image from the dns
 image with a failing check under `/usr/lib/greenboot/check/required.d/`, loads it
@@ -118,3 +132,7 @@ bash tests/scenarios/s0-base.sh
 bash tests/scenarios/s1-dns.sh
 bash tests/scenarios/greenboot-rollback.sh
 ```
+
+Set `LAB_RUN_DIR` to a directory the qemu user can traverse when the checkout
+sits under a `0700` home; `lab` and the scenario scripts read the same variable.
+The evidence still lands in `run/evidence/`.

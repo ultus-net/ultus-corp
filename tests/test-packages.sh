@@ -22,10 +22,11 @@ assert_ok "no seeded fact file"    podman run --rm "$img" bash -c '! test -e /ru
 
 # The daemon-level startup assertion lives in the provision gate, where the
 # rendered configuration is present. This container path has no systemd notify
-# socket, so the health check below is what covers the required check here.
+# socket, so the health check below is what covers the required check here. A
+# record marks the host as deployed, which is when the check must judge it.
 assert_fails "the health check fails without a resolver" \
-  podman run --rm -e ULTUS_HEALTH_TRIES=1 "$img" \
-  /etc/greenboot/check/required.d/50-dns-health.sh
+  podman run --rm -e ULTUS_HEALTH_TRIES=1 "$img" bash -c \
+  'mkdir -p /var/lib/ultus-corp/deployments && : > /var/lib/ultus-corp/deployments/deployed.json && exec /etc/greenboot/check/required.d/50-dns-health.sh'
 assert_ok "provision unit enabled" podman run --rm "$img" systemctl is-enabled ultus-provision.service
 assert_ok "health check executable" \
   podman run --rm "$img" test -x /etc/greenboot/check/required.d/50-dns-health.sh

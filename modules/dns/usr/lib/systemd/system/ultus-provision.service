@@ -2,7 +2,10 @@
 Description=Apply the delivered ultus-corp configuration
 Wants=network-online.target
 After=cloud-init.service network-online.target
-Before=named.service unbound.service ultus-role-install.target
+# The applier restarts named and unbound onto the delivered files. Ordering
+# those units after this one deadlocks the restart: the queued job waits for
+# the applier to finish while the applier waits for the job.
+Before=ultus-role-install.target
 
 [Service]
 Type=oneshot
