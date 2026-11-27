@@ -66,6 +66,20 @@ assert_eq "an identity without a DHCP interface fails at once" "yes" \
   "$(grep -q 'the identity at /run/ultus-corp/node.json names no DHCP interface' <<<"$out" \
     && grep -q 'status=1' <<<"$out" && echo yes || echo no)"
 
+# A malformed identity cannot be fixed by waiting either, and a decode error must
+# not surface as a traceback. The retry budget stays high so a retry would run
+# into the timeout and fail the case.
+out=$(podman run --rm -e ULTUS_DEPLOY_TRIES=1 -e ULTUS_HEALTH_TRIES=120 "$img" bash -c '
+  mkdir -p /run/ultus-corp /var/lib/ultus-corp/deployments
+  printf "%s\n" "{not json" > /run/ultus-corp/node.json
+  : > /var/lib/ultus-corp/deployments/deployed.json
+  timeout 5 /etc/greenboot/check/required.d/50-client-health.sh
+  echo "status=$?"
+' 2>&1 || true)
+assert_eq "a malformed identity fails at once without a traceback" "yes" \
+  "$(grep -q 'client health check:' <<<"$out" && grep -q 'status=1' <<<"$out" \
+    && ! grep -q 'Traceback' <<<"$out" && echo yes || echo no)"
+
 run_role_proof() {
   local role=$1 proof
   proof=$(sed -n '/^```proof$/,/^```$/p' "docs/roles/$role.md" | sed '1d;$d')

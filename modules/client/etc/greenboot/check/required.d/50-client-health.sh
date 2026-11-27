@@ -6,12 +6,39 @@ deployment_gate
 
 node=/run/ultus-corp/node.json
 # A delivered identity that names no DHCP interface can never satisfy the check,
-# so the shape fails at once instead of waiting out a lease that cannot come.
+# and a malformed one raises a traceback instead of a verdict. Both fail at once
+# with one message that names the path and the defect, so the retry loop below
+# can trust the shape it reads.
 python3 - "$node" <<'PY'
-import json, sys
-identity = json.load(open(sys.argv[1]))
-if not identity.get("dhcp_interfaces"):
-    raise SystemExit(f"the identity at {sys.argv[1]} names no DHCP interface")
+import ipaddress, json, sys
+
+path = sys.argv[1]
+
+def fail(message):
+    sys.stderr.write(f"client health check: {message}\n")
+    raise SystemExit(1)
+
+try:
+    with open(path, encoding="utf-8") as handle:
+        identity = json.load(handle)
+except json.JSONDecodeError:
+    fail(f"the identity at {path} is not valid JSON")
+except (OSError, UnicodeDecodeError):
+    fail(f"the identity at {path} is not readable")
+
+if not isinstance(identity, dict) or "dhcp_interfaces" not in identity:
+    fail(f"the identity at {path} names no DHCP interface")
+interfaces = identity["dhcp_interfaces"]
+if not isinstance(interfaces, list) or not interfaces:
+    fail(f"the identity at {path} has no dhcp_interfaces list")
+
+for index, interface in enumerate(interfaces):
+    if not isinstance(interface, dict) or not isinstance(interface.get("cidr"), str):
+        fail(f"dhcp_interfaces[{index}] at {path} is not an object with a string cidr")
+    try:
+        ipaddress.ip_network(interface["cidr"])
+    except ValueError:
+        fail(f"dhcp_interfaces[{index}].cidr at {path} is not a network: {interface['cidr']}")
 PY
 
 # The relay and Kea may still be deploying when this guest writes its record, so
