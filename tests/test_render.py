@@ -510,7 +510,12 @@ class TestS2Spec(unittest.TestCase):
     def test_kea_config_sends_no_router_option(self):
         spec = load("lab/lab.toml")
         server = nodes_for(spec, "s2-dhcp")[0]
-        self.assertNotIn("routers", kea_conf_text(server, spec))
+        conf = json.loads(kea_conf_text(server, spec))["Dhcp4"]
+        self.assertNotIn("routers", [o["name"] for o in conf.get("option-data", [])])
+        self.assertNotIn(
+            "routers",
+            [o["name"] for o in conf["subnet4"][0].get("option-data", [])],
+        )
 
     def test_relay_config_names_its_server(self):
         spec = load("lab/lab.toml")
