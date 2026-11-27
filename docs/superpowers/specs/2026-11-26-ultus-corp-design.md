@@ -150,7 +150,7 @@ Rules that make the model hold:
 | s0-base | 1 | 2 GiB | an image builds, boots, upgrades and rolls back |
 | s1-dns | 2 | 3 GiB | authoritative plus recursive, delegation intact |
 | s2-dhcp | 2 | 3 GiB | relay plus Kea, a lease survives a restart |
-| s3-overlay | 4 | 6 GiB | hub and one branch edge, routes, nftables policy, key rotation, time across the overlay |
+| s3-overlay | 4 | 8 GiB | hub and one branch edge, routes, nftables policy, the branch services, and the uplink-down case |
 | s4-pki | 2 | 3 GiB | root to intermediate to ACME leaf, trust without copying |
 | s5-identity | 4 | 9 GiB | FreeIPA, Keycloak federation, one OIDC app |
 | s6-radius | 3 | 5 GiB | FreeRADIUS, a real authenticator, EAP-TLS from a real supplicant |
@@ -235,7 +235,7 @@ library, so the renderer needs no dependency at all.
 | D7 | PKI | One offline lab root, two intermediates: step-ca for service TLS, FreeIPA CA for identity | Avoids a chicken-and-egg between TLS and identity, and shows a real hierarchy | One CA for everything; a public CA |
 | D8 | DNS | BIND 9 primary in the DC; Unbound recursive per site; FreeIPA owns `ipa.lab.internal` | LAN resolution survives identity and the WAN being down | FreeIPA as the only DNS; dnsmasq |
 | D9 | DHCP | Kea local to each branch, configured from the DC spec | Leases survive a WAN cut, and the branch stays a self-contained unit | DHCP relayed to the DC; DHCP on the directory |
-| D10 | Edge | One bootc role with `branch` and `hub` profiles: FRR, nftables, WireGuard, DHCP relay | The image thesis covers the network, not only the services | OPNsense appliances; host bridges only |
+| D10 | Edge | One bootc role with `branch` and `hub` profiles: FRR, nftables, WireGuard, DHCP relay. The `branch` profile also runs a BIND secondary, Unbound, Kea, chrony and a Caddy cache; the `hub` profile runs the hub BGP | The image thesis covers the network, not only the services | OPNsense appliances; host bridges only |
 | D11 | Provisioning | `bootc-image-builder` qcow2 plus a NoCloud seed ISO | The path `dux-atomic` already proves | Hand-built guests; cloud images |
 | D12 | Secrets | Generated once into a gitignored `lab-secrets/`; root key offline | Nothing sensitive enters git or an image | Committed keys; secrets baked into images |
 | D13 | Supply chain | cosign keyless per image, SBOM per image, trivy gate | Same gates as `dux-atomic` | Unsigned local builds |
@@ -247,7 +247,7 @@ library, so the renderer needs no dependency at all.
 | D19 | Integration evidence | A static interface-composition check plus a dated assembly run | Composition is checked continuously where it can be, and sampled where it cannot | Assuming a green scenario proves the network |
 | D20 | Rollback contract | The class belongs to each data store, not the role. Stateless roles redeploy the previous image; config-only roles redeploy the previous image and seed; durable stores are quiesced, backed up with the application's tool and restored into a matching image; rebuildable stores are wiped and re-created from the repository, a peer or upstream, with the accepted loss declared. A role can hold both, and `app` does. Gate 12 exercises one store per class, and gate 14 tests the declared loss | `/var` persists across deployments, and database schemas are not reliably reversible. Not all `/var` data is authoritative: DHCP leases, registry and proxy caches, monitoring history and deployment artifacts are rebuildable. Treating them as durable adds a backup burden that protects nothing | Treating `bootc rollback` as a data rollback; one generic snapshot rule for every role; backing up data that is cheaper to recreate |
 | D21 | Update plane | Quadlet containers are declared as bootc logically bound images under `/usr/lib/bootc/bound-images.d`, pinned by digest, preloaded by the disk build, and read through `GlobalArgs=--storage-opt=additionalimagestore=/usr/lib/bootc/storage`. No unit sets `AutoUpdate=registry`, and the auto-update timer is masked. Changing an application means building a new host image | A floating container in `/var/lib/containers` is outside the image digest, rollback, offline boot and SBOM. Without the storage argument the unit still uses floating storage; without preloading, a cold boot with no egress has no image | Independent container auto-update; digest pinning that still allows in-place application updates |
-| D22 | Branch footprint | One edge VM per branch. The branch profile runs the overlay plus a local BIND secondary, Unbound, Kea, chrony and a Caddy cache. Authority stays central; details reach the branch by zone transfer or at deploy | A branch needs local answers when the tunnel drops, and a second services VM buys nothing. Centralising the serving path would turn a WAN cut into an outage | A second services VM per branch; relaying DHCP and DNS to the hub |
+| D22 | Branch footprint | One edge VM per branch. The branch profile runs the overlay plus a local BIND secondary, Unbound, Kea, chrony and a Caddy cache. Authority stays central; details reach the branch by zone transfer or at deploy. Unbound owns the client-facing `:53`, the BIND secondary binds a separate loopback address and port, and Unbound forwards the local zones to it | A branch needs local answers when the tunnel drops, and a second services VM buys nothing. Centralising the serving path would turn a WAN cut into an outage | A second services VM per branch; relaying DHCP and DNS to the hub |
 
 ## Configuration and deployment inputs
 
@@ -458,6 +458,24 @@ Nothing pushes host configuration at runtime. A reservation change is a branch
 redeploy with a new seed. DNS is the exception because zone transfer is the
 protocol's own replication, not a configuration channel.
 
+### DNS listener contract
+
+Two resolvers on one host need two addresses. No daemon binds an address and
+port another already holds.
+
+| Host | Binds | Serves |
+| --- | --- | --- |
+| hub primary | its service address on `:53` | `lab.internal` authoritative |
+| hub resolver | loopback and management addresses on `:53`, never the primary's address | recursion; forwards `lab.internal` to the primary |
+| branch edge | the client-facing address on `:53` (Unbound) | recursion for clients; forwards `lab.internal` |
+| branch edge | `127.0.0.53:5353` (BIND secondary) | the transferred `lab.internal`; the forward target for Unbound |
+
+A branch client is configured with the edge address only. `ipa.lab.internal` is a
+delegation to FreeIPA: it answers while the tunnel is up, and fails after its TTL
+expires during a cut. That failure is the declared identity behaviour, not a
+fault. External names also fail during a cut; only the local zones are
+guaranteed, because that is all the secondary holds.
+
 ## Endpoint coverage
 
 | Capability | Linux | Windows | macOS |
@@ -479,7 +497,7 @@ out of scope, so no configuration profile is generated or validated.
 | --- | --- | --- | --- |
 | s0 | dns | BIND 9 primary, Unbound at the DC | zone data at the primary |
 | s2 | dhcp | Kea, lease store | yes |
-| s3 | edge | FRR, nftables, WireGuard, DHCP relay, `hostapd`; `branch` profile adds a BIND secondary, Unbound, Kea, chrony and a Caddy cache; `hub` profile adds the hub BGP | config only at the hub; rebuildable at the branch |
+| s3 | edge | FRR, nftables, WireGuard, DHCP relay, `hostapd`; `branch` profile adds a BIND secondary on `127.0.0.53:5353`, Unbound on the client-facing `:53`, Kea, chrony and a Caddy cache; `hub` profile adds the hub BGP | config only at the hub; rebuildable at the branch |
 | s3 | ntp | chrony | no |
 | s4 | pki | step-ca | yes, small |
 | s4 | proxy | Caddy, certmonger client | no |
@@ -512,7 +530,7 @@ enablement.
 | s0-base | Repo skeleton, CI, one `dns` role, one VM | A lookup answers, then `lab down s0-base` leaves no domain, network or volume |
 | s1-dns | Authoritative plus recursive, delegation to the FreeIPA stub | A client resolves `dns-br1.lab.internal` and `ipa.lab.internal` through the pair |
 | s2-dhcp | Edge relay plus local Kea with a lease store | A client leases across the relay, and the lease survives a Kea restart |
-| s3-overlay | Hub and one branch edge, WireGuard, nftables policy, hub-and-spoke routes, and the branch services | Branch 1 reaches DC subnets and cannot reach branch 2; with the uplink down, the edge still answers DNS, leases a client, serves time and serves a cached object |
+| s3-overlay | Hub and one branch edge, WireGuard, nftables policy, hub-and-spoke routes, and the branch services | Before the cut, the branch secondary completes an AXFR of `lab.internal` and the proxy cache serves one object. Branch 1 then reaches DC subnets and cannot reach branch 2; with the uplink down, the edge answers DNS from the transferred zone, leases a new client, serves time and serves the cached object, and `ipa.lab.internal` fails cleanly after its TTL |
 | s4-pki | Offline root, step-ca intermediate, ACME issuance | A guest receives a leaf from step-ca and trusts it without a manual copy |
 | s5-identity | FreeIPA, Keycloak federation, one OIDC app | A FreeIPA user logs in to Gitea over OIDC, and no local account exists |
 | s6-radius | FreeRADIUS, `hostapd` wired authenticator, a Linux supplicant | `eapol_test` passes, then a real supplicant completes EAP-TLS |

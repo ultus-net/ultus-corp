@@ -247,10 +247,11 @@ Expected: FAIL, `bind installed: package bind is not installed`.
 enabled with `systemctl is-enabled`, exiting non-zero with the unit name on
 failure.
 
-`named.conf` listens on all addresses, serves `lab.internal` from
-`/var/named/lab.internal.zone`, and forwards nothing. `unbound.conf` listens on
-the loopback and management addresses, with a forward zone for `lab.internal`
-pointing at the primary.
+`named.conf` binds the primary's service address on `:53`, serves
+`lab.internal` from `/var/named/lab.internal.zone`, and forwards nothing.
+`unbound.conf` binds the loopback and management addresses on `:53`, with a
+forward zone for `lab.internal` pointing at the primary's address. No address is
+held by both daemons.
 
 `ultus-dns-ready.service` is a `Type=oneshot` unit that runs `named-checkconf`
 and exits, so a bad config fails the boot visibly rather than inside a log.
