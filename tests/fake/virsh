@@ -42,5 +42,6 @@ case "$cmd" in
   net-destroy) remove_line "$dir/nets-running" "$1" ;;
   net-undefine) remove_line "$dir/networks" "$1" ;;
   net-list) cat "$dir/networks" ;;
+  change-media) echo "eject $1" >> "$dir/media" ;;
   *) echo "fake virsh: unsupported command $cmd" >&2; exit 1 ;;
 esac

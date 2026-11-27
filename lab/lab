@@ -17,6 +17,7 @@ sys.path.insert(0, str(HERE))
 
 import render  # noqa: E402
 import state as runstate  # noqa: E402
+import deploy  # noqa: E402
 
 os.environ.setdefault("LIBVIRT_DEFAULT_URI", "qemu:///system")
 RUN = Path(os.environ.get("LAB_RUN_DIR") or ROOT / "run")
@@ -89,13 +90,18 @@ def make_seed_iso(seed_dir: Path, iso: Path) -> None:
 
 
 def create_seed(
-    node: render.Node, spec: render.Spec, run_dir: Path, public_key: str
+    node: render.Node,
+    spec: render.Spec,
+    run_dir: Path,
+    public_key: str,
+    deployment_id: str,
 ) -> Path:
     node_dir = run_dir / "seed" / node.name
     node_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(run_dir / "seed", 0o700)
     os.chmod(node_dir, 0o700)
-    for name, content in render.seed_files(node, spec, public_key).items():
+    seed = render.seed_files(node, spec, public_key, deployment_id=deployment_id)
+    for name, content in seed.items():
         target = node_dir / name
         target.write_text(content, encoding="utf-8")
         os.chmod(target, 0o600)
@@ -123,6 +129,60 @@ def build_disk(role: str, target: Path) -> None:
         raise RuntimeError(f"disk builder failed: {done.stderr.strip()}")
 
 
+def disk_provenance(volume: Path) -> tuple[str, str]:
+    """The image the disk was built from, as recorded beside it.
+
+    A disk without both sidecars cannot be checked against the guest's record,
+    so it fails here rather than after a ten-minute boot.
+    """
+    image_id = volume.with_name(volume.name + ".id")
+    digest = volume.with_name(volume.name + ".digest")
+    missing = [str(path) for path in (image_id, digest) if not path.exists()]
+    if missing:
+        raise RuntimeError(f"disk provenance is missing: {', '.join(missing)}")
+    return (
+        image_id.read_text(encoding="utf-8").strip(),
+        digest.read_text(encoding="utf-8").strip(),
+    )
+
+
+def consume_seed(state: dict, state_file: Path, scenario: str, node: render.Node) -> None:
+    """Eject and delete the seed once the deployment that used it is recorded."""
+    domain = f"ultus-{scenario}-{node.name}"
+    done = virsh("change-media", domain, "sda", "--eject", "--live", "--config")
+    if done.returncode != 0:
+        raise RuntimeError(f"eject {domain}: {done.stderr.strip()}")
+    wanted = {
+        f"ultus-{scenario}-{node.name}-seed",
+        f"ultus-{scenario}-{node.name}-seed.iso",
+    }
+    for resource in state["resources"]:
+        if resource["name"] in wanted:
+            delete(resource)
+            # Teardown keeps the entry so the run still shows what it created,
+            # and tolerates the absent path on a second pass.
+            resource["consumed"] = True
+    runstate.write(state_file, state)
+
+
+def wait_for_deployments(
+    state: dict, state_file: Path, scenario: str, nodes: list[render.Node]
+) -> None:
+    timeout = float(os.environ.get("LAB_DEPLOY_TIMEOUT", "900"))
+    for node in nodes:
+        info = state["nodes"][node.name]
+        _, digest = disk_provenance(Path(info["volume"]))
+        record = deploy.await_record(
+            info["address"], info["deployment_id"], timeout=timeout
+        )
+        deploy.verify_record(record, info["deployment_id"], node.role, digest)
+        # The harness keeps the history the guest deliberately does not.
+        runstate.record_deployment(state, record)
+        runstate.write(state_file, state)
+        consume_seed(state, state_file, scenario, node)
+        print(f"{node.name} deployed as {info['deployment_id']}")
+
+
 def delete(resource: dict) -> None:
     kind = resource["kind"]
     name = resource["name"]
@@ -142,6 +202,11 @@ def delete(resource: dict) -> None:
             shutil.rmtree(target, ignore_errors=True)
         else:
             target.unlink(missing_ok=True)
+            if kind == "volume":
+                # The provenance sidecars are part of the disk resource, so a
+                # stale digest never outlives the disk it describes.
+                for suffix in (".id", ".digest"):
+                    target.with_name(target.name + suffix).unlink(missing_ok=True)
     else:
         raise RuntimeError(f"unknown resource kind {kind}")
 
@@ -197,10 +262,13 @@ def cmd_up(args: argparse.Namespace) -> int:
     render_dir = run_dir / "render"
     render_dir.mkdir(parents=True, exist_ok=True)
     state = runstate.new(scenario)
+    public_key = ssh_key()
     for node in nodes:
         state["nodes"][node.name] = {
             "address": node.interfaces[0].address,
             "domain": f"ultus-{scenario}-{node.name}",
+            "deployment_id": render.new_deployment_id(),
+            "volume": str(run_dir / f"ultus-{scenario}-{node.name}.qcow2"),
         }
     runstate.write(state_file, state)
 
@@ -219,7 +287,9 @@ def cmd_up(args: argparse.Namespace) -> int:
                 raise RuntimeError(f"net-start {name}: {done.stderr.strip()}")
 
         for node in nodes:
-            seed_dir = create_seed(node, spec, run_dir, ssh_key())
+            seed_dir = create_seed(
+                node, spec, run_dir, public_key, state["nodes"][node.name]["deployment_id"]
+            )
             runstate.add(
                 state,
                 "seed",
@@ -269,6 +339,17 @@ def cmd_up(args: argparse.Namespace) -> int:
         print(f"up failed: {exc}", file=sys.stderr)
         code = teardown(state, state_file)
         return max(code, 1) if code else 1
+
+    # A guest that booted but never recorded its deployment is not up. The VMs
+    # are left running so the failure can be read from the console and the
+    # journal, which a teardown would destroy.
+    if os.environ.get("LAB_DEPLOY_WAIT", "") != "skip":
+        try:
+            wait_for_deployments(state, state_file, scenario, nodes)
+        except Exception as exc:  # noqa: BLE001 - the message is the report
+            print(f"deployment failed: {exc}", file=sys.stderr)
+            print(f"the scenario is still up; inspect it, then lab down {scenario}")
+            return 1
 
     print(f"{scenario} is up: {', '.join(node.name for node in nodes)}")
     return 0
@@ -368,7 +449,68 @@ def traversable(path: Path) -> bool:
     return True
 
 
-def cmd_doctor(_: argparse.Namespace) -> int:
+def host_uplinks() -> list[str]:
+    """The host's own address plan, never the lab's bridges.
+
+    A physical interface has a `device` link in sysfs. The interface carrying
+    the default route is included even when it is virtual, because that is the
+    path off the host. Every non-default route on those interfaces is included
+    too, so a VPN or a second LAN is compared as well.
+    """
+    try:
+        links = json.loads(
+            subprocess.run(
+                ["ip", "-j", "addr", "show"], capture_output=True, text=True, check=True
+            ).stdout
+        )
+        routes = json.loads(
+            subprocess.run(
+                ["ip", "-j", "route", "show"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        )
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read the host address plan: {exc}") from exc
+
+    uplinks = {
+        route.get("dev")
+        for route in routes
+        if route.get("dst") == "default" and route.get("dev")
+    }
+    for link in links:
+        name = link.get("ifname")
+        if name and Path(f"/sys/class/net/{name}/device").exists():
+            uplinks.add(name)
+
+    prefixes: set[str] = set()
+    for link in links:
+        if link.get("ifname") not in uplinks:
+            continue
+        for info in link.get("addr_info", []):
+            if info.get("family") == "inet":
+                prefixes.add(f"{info['local']}/{info['prefixlen']}")
+    for route in routes:
+        dst = route.get("dst")
+        if not dst or dst == "default" or ":" in dst:
+            continue
+        if route.get("dev") in uplinks:
+            prefixes.add(dst)
+    return sorted(prefixes)
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    if args.host_uplinks:
+        try:
+            prefixes = host_uplinks()
+        except RuntimeError as exc:
+            fail(str(exc))
+        if not prefixes:
+            fail("no host uplink addresses found; refusing to call the lab disjoint")
+        print("\n".join(prefixes))
+        return 0
+
     problems = []
     if sys.version_info < (3, 11):
         problems.append("python 3.11 or newer")
@@ -477,7 +619,9 @@ def main(argv: list[str]) -> int:
     test.add_argument("scenario")
     test.set_defaults(func=cmd_test)
 
-    sub.add_parser("doctor").set_defaults(func=cmd_doctor)
+    doctor = sub.add_parser("doctor")
+    doctor.add_argument("--host-uplinks", action="store_true")
+    doctor.set_defaults(func=cmd_doctor)
     prune = sub.add_parser("prune")
     prune.add_argument("--all", action="store_true")
     prune.set_defaults(func=cmd_prune)

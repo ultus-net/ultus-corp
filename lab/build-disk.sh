@@ -18,12 +18,21 @@ fi
 
 id_full=$(podman image inspect --format '{{.Id}}' "$image")
 id=${id_full:0:12}
+digest=$(podman image inspect --format '{{.Digest}}' "$image")
+if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "build-disk.sh: $image has no manifest digest: '${digest}'" >&2
+  exit 1
+fi
 cache="build/vm/cache/$role-$id.qcow2"
 # The file name alone cannot prove the disk's origin: a pre-fix build stored an
 # older image's disk under this id, and a cache hit then served it. So a hit
 # also needs the id recorded beside the disk.
 if [ -f "$cache" ] && [ "$(cat "$cache.id" 2>/dev/null)" = "$id_full" ]; then
   cp -f "$cache" "$out"
+  # The guest records the digest `bootc status` reports, so the harness needs
+  # the same value to compare against. It is the image's manifest digest.
+  printf '%s\n' "$id_full" > "$out.id"
+  printf '%s\n' "$digest" > "$out.digest"
   echo "disk for $role from $cache"
   exit 0
 fi
@@ -73,5 +82,7 @@ mkdir -p "$(dirname "$cache")"
 cp -f "$outdir/qcow2/disk.qcow2" "$cache"
 printf '%s\n' "$id_full" > "$cache.id"
 cp -f "$cache" "$out"
+printf '%s\n' "$id_full" > "$out.id"
+printf '%s\n' "$digest" > "$out.digest"
 rm -rf "$outdir"
 echo "disk for $role at $out"

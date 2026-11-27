@@ -9,12 +9,20 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import re
 import sys
 import tomllib
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# A deployment id is a systemd instance name, so it is a lowercase UUIDv4 and
+# nothing else. `finalize.sh` refuses anything that does not match.
+DEPLOYMENT_ID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 
 __all__ = [
     "Lab",
@@ -35,6 +43,7 @@ __all__ = [
     "unbound_conf_text",
     "managed_files",
     "managed_manifest",
+    "new_deployment_id",
     "node_identity",
     "network_xml",
     "domain_xml",
@@ -612,6 +621,11 @@ def managed_manifest(node: Node, spec: Spec) -> str:
     )
 
 
+def new_deployment_id() -> str:
+    """A fresh lowercase UUIDv4, always a valid systemd instance name."""
+    return str(uuid.uuid4())
+
+
 def node_identity(node: Node, spec: Spec) -> dict:
     """The identity facts the applier reads at /run/ultus-corp/node.json.
 
@@ -627,12 +641,26 @@ def node_identity(node: Node, spec: Spec) -> dict:
     }
 
 
-def seed_files(node: Node, spec: Spec, ssh_key: str | None = None) -> dict[str, str]:
+def seed_files(
+    node: Node,
+    spec: Spec,
+    ssh_key: str | None = None,
+    deployment_id: str | None = None,
+) -> dict[str, str]:
     """NoCloud seed as three strings. JSON is a valid YAML subset."""
     instance_id = f"ultus-{node.scenario}-{node.name}"
     fqdn = _fqdn(node.name, spec)
+    deployment = deployment_id or new_deployment_id()
+    if not DEPLOYMENT_ID.match(deployment):
+        raise ValueError(f"deployment id is not a lowercase UUIDv4: {deployment}")
 
-    meta = f"instance-id: {instance_id}\nlocal-hostname: {fqdn}\n"
+    # cloud-init ignores unknown meta-data keys, and the systemd instance must
+    # carry the same value, so the id is in both places and finalize checks them.
+    meta = (
+        f"instance-id: {instance_id}\n"
+        f"local-hostname: {fqdn}\n"
+        f"deployment_id: {deployment}\n"
+    )
 
     ethernets = {}
     for index, iface in enumerate(node.interfaces):
@@ -666,6 +694,14 @@ def seed_files(node: Node, spec: Spec, ssh_key: str | None = None) -> dict[str, 
             "content": json.dumps(node_identity(node, spec), indent=2),
         }
     )
+    write_files.append(
+        {
+            "path": "/run/ultus-corp/deployment-id",
+            "owner": "root:root",
+            "permissions": "0644",
+            "content": deployment + "\n",
+        }
+    )
 
     user_data = "#cloud-config\n" + json.dumps(
         {
@@ -679,7 +715,19 @@ def seed_files(node: Node, spec: Spec, ssh_key: str | None = None) -> dict[str, 
                 else []
             ),
             "write_files": write_files,
-            "runcmd": ["systemctl enable --now ultus-provision.service"],
+            # The ready target is ordered after cloud-final, so enabling the
+            # instance here is enough: the target pulls it in once cloud-final
+            # finishes, and its condition skips it on every later boot.
+            # One command, so a failed role install never reaches the finalize
+            # enable: a deployment that did not install must not be recorded.
+            # The ready target is started without blocking, because it is
+            # ordered after cloud-final and this command runs inside it.
+            "runcmd": [
+                "set -e; "
+                "systemctl start ultus-role-install.target; "
+                f"systemctl enable ultus-deploy-finalize@{deployment}.service; "
+                "systemctl --no-block start ultus-deploy-ready.target"
+            ],
         },
         indent=2,
     )

@@ -1,0 +1,15 @@
+[Unit]
+Description=Record ultus-corp deployment %i
+After=cloud-final.service ultus-role-install.target
+Before=ultus-deploy-ready.target
+# One record per deployment id, not one per host. A second boot, or a restart of
+# the ready target, must not run this again.
+ConditionPathExists=!/var/lib/ultus-corp/deployments/%i.json
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/ultus-corp/finalize.sh %i
+
+[Install]
+WantedBy=ultus-deploy-ready.target
