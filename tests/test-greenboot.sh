@@ -31,6 +31,16 @@ assert_fails "a delivered id without a record fails the check" \
   "mkdir -p /run/ultus-corp && printf '%s\n' $delivered_id > /run/ultus-corp/deployment-id && /etc/greenboot/check/required.d/50-dns-health.sh"
 assert_ok "the failure names the unfinished deployment" \
   bash -c "podman run --rm -e ULTUS_DEPLOY_TRIES=1 '$img' bash -c \"mkdir -p /run/ultus-corp && printf '%s\n' $delivered_id > /run/ultus-corp/deployment-id && /etc/greenboot/check/required.d/50-dns-health.sh\" 2>&1 | grep -q 'deployment $delivered_id did not record'"
+# A record for another deployment must not mask the delivered id's absence.
+assert_fails "another deployment's record does not satisfy the id" \
+  podman run --rm -e ULTUS_DEPLOY_TRIES=1 "$img" bash -c \
+  "mkdir -p /run/ultus-corp /var/lib/ultus-corp/deployments && printf '%s\n' $delivered_id > /run/ultus-corp/deployment-id && printf '{}\n' > /var/lib/ultus-corp/deployments/00000000-0000-4000-8000-000000000000.json && /etc/greenboot/check/required.d/50-dns-health.sh"
+# The applier refuses an id that is not a lowercase UUIDv4, so the check must
+# refuse the same shape instead of waiting on a record path it cannot hold.
+bad_id=c1cfba26-9fc0-1f7d-8b73-ee463e8df2d0
+assert_fails "a delivered id that is not a UUIDv4 is refused" \
+  podman run --rm -e ULTUS_DEPLOY_TRIES=1 "$img" bash -c \
+  "mkdir -p /run/ultus-corp && printf '%s\n' $bad_id > /run/ultus-corp/deployment-id && /etc/greenboot/check/required.d/50-dns-health.sh"
 # With the record present the check moves on to the service it validates.
 assert_ok "a recorded deployment proceeds to the zone check" \
   bash -c "podman run --rm -e ULTUS_DEPLOY_TRIES=1 -e ULTUS_HEALTH_TRIES=1 '$img' bash -c \"mkdir -p /run/ultus-corp /var/lib/ultus-corp/deployments && printf '%s\n' $delivered_id > /run/ultus-corp/deployment-id && printf '{}\n' > /var/lib/ultus-corp/deployments/$delivered_id.json && /etc/greenboot/check/required.d/50-dns-health.sh\" 2>&1 | grep -q 'no SOA for lab.internal'"

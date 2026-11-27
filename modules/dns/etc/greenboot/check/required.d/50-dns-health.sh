@@ -14,16 +14,13 @@ records=/var/lib/ultus-corp/deployments
 idfile=/run/ultus-corp/deployment-id
 if [ -s "$idfile" ]; then
   id=$(tr -d '[:space:]' < "$idfile")
-  case "$id" in
-    *[!0-9a-f-]*|"")
-      echo "deployment id file does not hold a plain id: $id" >&2
-      exit 1
-      ;;
-  esac
-  [ "${#id}" -eq 36 ] || {
-    echo "deployment id is not 36 characters: $id" >&2
+  # The applier refuses anything that is not a lowercase UUIDv4, so the check
+  # uses the same shape. A looser match would accept an id the record path can
+  # never hold, and the wait would end in a misleading timeout.
+  if [[ ! "$id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+    echo "deployment id is not a lowercase UUIDv4: $id" >&2
     exit 1
-  }
+  fi
   record=/var/lib/ultus-corp/deployments/$id.json
   for _ in $(seq "${ULTUS_DEPLOY_TRIES:-120}"); do
     [ -s "$record" ] && break

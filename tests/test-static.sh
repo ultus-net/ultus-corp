@@ -76,4 +76,9 @@ assert_fails "install media rejected"             check_no_install_media tests/f
 assert_ok    "complete role record accepted"      check_role_records tests/fixtures/roles/dns.md
 assert_fails "incomplete role record rejected"    check_role_records tests/fixtures/roles/incomplete.md
 
+# A scenario that hardcodes run/ cannot reach its tree when LAB_RUN_DIR moves it
+# outside a 0700 home, which is the case the qemu user cannot traverse.
+assert_ok "scenario scripts use the exported run directory" \
+  bash -c '! grep -RInE "(^|[^$A-Za-z_])run/" tests/scenarios'
+
 finish
