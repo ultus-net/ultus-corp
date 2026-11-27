@@ -1,0 +1,11 @@
+<network>
+  <name>ultus-fixture-leaking</name>
+  <forward mode='nat'/>
+  <bridge name='virbr9'/>
+  <dns enable='no'/>
+  <ip address='10.100.99.1' prefix='24'>
+    <dhcp>
+      <range start='10.100.99.10' end='10.100.99.99'/>
+    </dhcp>
+  </ip>
+</network>

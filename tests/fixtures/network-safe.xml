@@ -1,0 +1,5 @@
+<network>
+  <name>ultus-fixture-safe</name>
+  <dns enable='no'/>
+  <ip address='10.100.99.1' prefix='24'/>
+</network>
