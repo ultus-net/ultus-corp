@@ -3,6 +3,20 @@ realm = "LAB.INTERNAL"
 domain = "lab.internal"
 overlay = "10.255.0.0/16"
 
+[dns]
+serial = 2026112701
+ttl = 3600
+refresh = 3600
+retry = 600
+expire = 604800
+minimum = 300
+
+  # The identity node does not exist yet, so the delegation carries its glue.
+  [[dns.delegate]]
+  name = "ipa"
+  ns = "ipa.lab.internal."
+  address = "10.100.10.53"
+
 [[site]]
 id = "dc"
 prefix = "10.100.0.0/16"

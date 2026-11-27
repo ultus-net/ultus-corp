@@ -14,28 +14,15 @@ run_role_proof() {
 
 assert_ok "bind installed"         podman run --rm "$img" rpm -q bind
 assert_ok "unbound installed"      podman run --rm "$img" rpm -q unbound
-assert_ok "zone file present"      podman run --rm "$img" test -s /var/named/lab.internal.zone
-assert_ok "named config valid"     podman run --rm "$img" named-checkconf -z /etc/named.conf
-assert_ok "unbound config valid"   podman run --rm "$img" unbound-checkconf /etc/unbound/unbound.conf
-# unbound-checkconf accepts a chroot the daemon cannot start inside, so the
-# effective chroot is asserted rather than the file's syntax alone.
-assert_eq "unbound runs unchrooted" "" \
-  "$(podman run --rm "$img" unbound-checkconf -o chroot /etc/unbound/unbound.conf)"
+# Configuration is deployment data. An image that shipped it would answer with
+# whatever address the last build happened to bake in.
+assert_ok "no zone shipped"        podman run --rm "$img" bash -c '! test -e /var/named/lab.internal.zone'
+assert_ok "applier installed"      podman run --rm "$img" test -x /usr/libexec/ultus-corp/provision.sh
+assert_ok "no seeded fact file"    podman run --rm "$img" bash -c '! test -e /run/ultus-corp/node.json'
 
-# And the daemon itself has to start and bind. This container path has no
-# systemd notify socket, so it cannot reproduce the chroot failure; the
-# assertion above is what covers that one.
-unbound_binds() {
-  podman run --rm "$img" bash -c '
-    unbound -d &
-    pid=$!
-    sleep 3
-    kill -0 "$pid" || { echo "unbound exited at startup"; exit 1; }
-    ss -lun | grep -q "127.0.0.1:53" || { echo "unbound does not listen on 127.0.0.1:53"; exit 1; }
-    kill "$pid"
-  '
-}
-assert_ok "unbound starts and binds loopback" unbound_binds
+# The daemon-level startup assertion lives in the provision gate, where the
+# rendered configuration is present. This container path has no systemd notify
+# socket, so the health check below is what covers the required check here.
 assert_fails "the health check fails without a resolver" \
   podman run --rm -e ULTUS_HEALTH_TRIES=1 "$img" \
   /etc/greenboot/check/required.d/50-dns-health.sh

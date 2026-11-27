@@ -1,81 +1,37 @@
 #!/usr/bin/env bash
+# Apply the configuration the deployment delivered.
+# Nothing here renders a per-site value: the seed carries the final files.
 set -euo pipefail
 
 node=/run/ultus-corp/node.json
-[ -s "$node" ] || { echo "provision: $node is missing" >&2; exit 1; }
+conf=/etc/named.conf
+resolver=/etc/unbound/unbound.conf
+zone=/var/named/lab.internal.zone
 
-read -r name address secondary < <(python3 - "$node" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1]))
-print(data["name"], data["interfaces"][0]["address"], data.get("secondary", ""))
-PY
-)
+for file in "$node" "$conf" "$resolver"; do
+  [ -s "$file" ] || {
+    echo "provision: $file is missing; the deployment did not deliver it" >&2
+    exit 1
+  }
+done
 
-python3 - "$node" /etc/named.conf <<'PY'
-import json, os, re, sys
+primary=$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1]))["primary"] else "")' "$node")
 
-node_path, conf_path = sys.argv[1], sys.argv[2]
-data = json.load(open(node_path))
-address = data["interfaces"][0]["address"]
-secondaries = data.get("secondaries", [])
-
-conf = open(conf_path).read().replace("127.0.0.2", address)
-
-if data.get("secondary"):
-    stanza = [
-        'zone "lab.internal" {',
-        "    type secondary;",
-        '    file "lab.internal.zone";',
-        f'    masters {{ {data["secondary"]}; }};',
-        "    allow-transfer { none; };",
-        "};",
-    ]
-else:
-    peers = " ".join(f"{peer};" for peer in secondaries) or "none;"
-    stanza = [
-        'zone "lab.internal" {',
-        "    type primary;",
-        '    file "lab.internal.zone";',
-        f"    allow-transfer {{ {peers} }};",
-    ]
-    if secondaries:
-        stanza.append(f"    also-notify {{ {peers} }};")
-    stanza += ["    allow-update { none; };", "};"]
-
-conf = re.sub(
-    r"# BEGIN ultus-zone\n.*?# END ultus-zone\n",
-    "# BEGIN ultus-zone\n" + "\n".join(stanza) + "\n# END ultus-zone\n",
-    conf,
-    flags=re.S,
-)
-open(conf_path, "w").write(conf)
-
-# A secondary takes the zone from its master. A shipped copy carries the same
-# serial, so BIND would keep it instead of transferring, and the file is
-# removed before the first boot.
-if data.get("secondary"):
-    for suffix in ("", ".jnl"):
-        try:
-            os.unlink(f"/var/named/lab.internal.zone{suffix}")
-        except FileNotFoundError:
-            pass
-PY
-
-if [ -z "$address" ]; then
-  echo "provision: no node address" >&2
-  exit 1
+# A secondary receives no zone, and a file left by an earlier deployment would
+# carry the primary's serial, so BIND would serve it instead of transferring.
+if [ -z "$primary" ]; then
+  rm -f "$zone" "$zone.jnl"
 fi
-# The node's resolver answers from its own named, whether it owns the zone or
-# copies it, so the forwarder is always this node's address.
-sed -i "s/^\( *forward-addr: \).*/\1${address}/" /etc/unbound/unbound.conf
 
-if [ -z "$secondary" ]; then
-  short=${name%%.*}
-  sed -i "s/\bdns-a\b/${short}/g; s/127\.0\.0\.2/${address}/g" /var/named/lab.internal.zone
-  named-checkconf -z /etc/named.conf
-else
-  # A secondary has no local zone file until the transfer, so loading zones
-  # here would fail. The health check proves the transferred zone answers.
-  named-checkconf /etc/named.conf
+# cloud-init creates these files unconfined, so they inherit the label of their
+# parent directory. named and unbound are confined, and cannot read them until
+# the policy's own types are applied.
+if [ -e /sys/fs/selinux/enforce ]; then
+  restorecon -RF "$conf" /etc/unbound /var/named
 fi
-unbound-checkconf
+
+named-checkconf "$conf"
+if [ -n "$primary" ]; then
+  named-checkconf -z "$conf"
+fi
+unbound-checkconf "$resolver"

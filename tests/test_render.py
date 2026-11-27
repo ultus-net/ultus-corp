@@ -4,7 +4,25 @@ import json
 
 from pathlib import Path
 
-from lab.render import load, nodes_for, network_xml, domain_xml, seed_files, interface_mac, node_payload, Spec, Node, Segment
+from lab.render import (
+    load,
+    nodes_for,
+    network_xml,
+    domain_xml,
+    seed_files,
+    interface_mac,
+    zone_text,
+    named_conf_text,
+    unbound_conf_text,
+    managed_files,
+    managed_manifest,
+    node_identity,
+    primary_of,
+    secondaries_of,
+    Spec,
+    Node,
+    Segment,
+)
 
 
 class TestLoad(unittest.TestCase):
@@ -193,19 +211,132 @@ class TestSeedFiles(unittest.TestCase):
         self.assertEqual(user["users"], [])
 
 
+class TestDnsRendering(unittest.TestCase):
+    def primary(self):
+        spec = load("lab/lab.toml")
+        return spec, nodes_for(spec, "s1-dns")[0]
+
+    def secondary(self):
+        spec = load("lab/lab.toml")
+        return spec, nodes_for(spec, "s1-dns")[1]
+
+    def test_zone_lists_every_scenario_node(self):
+        spec, dns_a = self.primary()
+        zone = zone_text(dns_a, spec)
+        self.assertIn("dns-a   IN  A   10.100.10.11", zone)
+        self.assertIn("dns-b   IN  A   10.100.10.12", zone)
+
+    def test_zone_soa_names_the_primary(self):
+        spec, dns_a = self.primary()
+        zone = zone_text(dns_a, spec)
+        self.assertIn("SOA dns-a.lab.internal. hostmaster.lab.internal.", zone)
+        self.assertIn("@       IN  NS  dns-a.lab.internal.", zone)
+        self.assertIn("$TTL 3600", zone)
+
+    def test_zone_carries_the_delegation_glue(self):
+        spec, dns_a = self.primary()
+        zone = zone_text(dns_a, spec)
+        self.assertIn("ipa   IN  NS  ipa.lab.internal.", zone)
+        self.assertIn("ipa   IN  A   10.100.10.53", zone)
+
+    def test_primary_conf_transfers_and_notifies(self):
+        spec, dns_a = self.primary()
+        conf = named_conf_text(dns_a, spec)
+        self.assertIn("type primary;", conf)
+        self.assertIn("allow-transfer { 10.100.10.12; }", conf)
+        self.assertIn("also-notify { 10.100.10.12; }", conf)
+        self.assertIn("listen-on port 53 { 10.100.10.11; 127.0.0.1; }", conf)
+
+    def test_primary_conf_is_final(self):
+        spec, dns_a = self.primary()
+        # A placeholder would be a value the guest still had to substitute.
+        self.assertNotIn("127.0.0.2", named_conf_text(dns_a, spec))
+
+    def test_secondary_conf_names_its_master(self):
+        spec, dns_b = self.secondary()
+        conf = named_conf_text(dns_b, spec)
+        self.assertIn("type secondary;", conf)
+        self.assertIn("masters { 10.100.10.11; }", conf)
+
+    def test_secondary_gets_no_zone(self):
+        spec, dns_b = self.secondary()
+        self.assertNotIn("/var/named/lab.internal.zone", managed_files(dns_b, spec))
+
+    def test_secondary_deletes_a_stale_zone(self):
+        # A shipped or leftover copy would carry the primary's serial.
+        spec, dns_b = self.secondary()
+        files = managed_files(dns_b, spec)
+        self.assertEqual(
+            sorted(files), ["/etc/named.conf", "/etc/unbound/unbound.conf"]
+        )
+
+    def test_resolver_forwards_to_its_own_named(self):
+        spec, dns_a = self.primary()
+        spec_b, dns_b = self.secondary()
+        self.assertIn("forward-addr: 10.100.10.11", unbound_conf_text(dns_a, spec))
+        self.assertIn("forward-addr: 10.100.10.12", unbound_conf_text(dns_b, spec_b))
+        self.assertIn('chroot: ""', unbound_conf_text(dns_a, spec))
+
+    def test_manifest_hashes_the_rendered_bytes(self):
+        import hashlib
+
+        spec, dns_a = self.primary()
+        manifest = managed_manifest(dns_a, spec)
+        lines = manifest.splitlines()
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            digest, path = line.split("  ", 1)
+            self.assertEqual(
+                digest, hashlib.sha256(managed_files(dns_a, spec)[path].encode()).hexdigest()
+            )
+        self.assertEqual([line.split("  ", 1)[1] for line in lines], sorted(
+            ["/etc/named.conf", "/etc/unbound/unbound.conf", "/var/named/lab.internal.zone"]
+        ))
+
+    def test_seed_carries_the_final_configuration(self):
+        spec, dns_a = self.primary()
+        user = json.loads(seed_files(dns_a, spec)["user-data"].split("\n", 1)[1])
+        paths = [item["path"] for item in user["write_files"]]
+        self.assertIn("/etc/named.conf", paths)
+        self.assertIn("/run/ultus-corp/node.json", paths)
+        zone = next(i for i in user["write_files"] if i["path"].endswith(".zone"))
+        self.assertEqual(zone["owner"], "root:named")
+        self.assertEqual(zone["permissions"], "0640")
+
+    def test_identity_marks_a_secondary(self):
+        spec, dns_b = self.secondary()
+        self.assertFalse(node_identity(dns_b, spec)["primary"])
+        self.assertEqual(node_identity(dns_b, spec)["role"], "dns")
+
+    def test_identity_is_not_a_managed_file(self):
+        # The identity tells the applier what to do. Gate 10 hashes what the
+        # deployment configures, and the identity is neither.
+        spec, dns_a = self.primary()
+        self.assertNotIn("/run/ultus-corp/node.json", managed_files(dns_a, spec))
+
+    def test_unknown_dns_key_rejected(self):
+        from pathlib import Path as P
+        import tempfile
+
+        source = P("lab/lab.toml").read_text()
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as handle:
+            handle.write(source.replace('serial = 2026112701', 'serial = 2026112701\nbogus = 1'))
+            path = handle.name
+        with self.assertRaises(ValueError):
+            load(path)
+        P(path).unlink()
+
+
 class TestTopology(unittest.TestCase):
     def test_primary_lists_its_secondaries(self):
         spec = load("lab/lab.toml")
-        payload = node_payload(nodes_for(spec, "s1-dns")[0], spec)
-        self.assertEqual(payload["secondaries"], ["10.100.10.12"])
-        self.assertNotIn("secondary", payload)
+        dns_a = nodes_for(spec, "s1-dns")[0]
+        self.assertEqual([n.name for n in secondaries_of(dns_a, spec)], ["dns-b"])
 
-    def test_secondary_names_the_primary_address(self):
-        # provision.sh writes `masters { … }`, which needs an address, not a name.
+    def test_secondary_names_the_primary(self):
         spec = load("lab/lab.toml")
-        payload = node_payload(nodes_for(spec, "s1-dns")[1], spec)
-        self.assertEqual(payload["secondary"], "10.100.10.11")
-        self.assertNotIn("secondaries", payload)
+        dns_b = nodes_for(spec, "s1-dns")[1]
+        self.assertEqual(primary_of(dns_b, spec).name, "dns-a")
 
     def test_secondary_must_exist(self):
         with self.assertRaises(ValueError):

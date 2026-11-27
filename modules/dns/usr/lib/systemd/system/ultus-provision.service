@@ -1,5 +1,5 @@
 [Unit]
-Description=Render the ultus-corp node configuration
+Description=Apply the delivered ultus-corp configuration
 Wants=network-online.target
 After=cloud-init.service network-online.target
 Before=named.service unbound.service

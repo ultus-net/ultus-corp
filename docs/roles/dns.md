@@ -14,10 +14,13 @@ exists.
 - `unbound` listens on `127.0.0.1:53` and forwards `lab.internal` to this node's
   own address, whether the node owns the zone or copies it. A secondary that
   forwarded to its primary would fail its own health check during a failover.
-- `ultus-provision.service` runs before `named` and rewrites both files from
-  `/run/ultus-corp/node.json`: the authoritative listen address, the unbound
-  forwarder, the zone stanza for this node's role, and, on a primary, the zone's
-  owner name and address.
+- The image ships no `named.conf`, no `unbound.conf` and no zone. The lab
+  renderer writes all three from `lab/lab.toml` and the seed carries the final
+  bytes, so no run's address is baked into a build.
+- `ultus-provision.service` applies them before `named` and `unbound` start. It
+  restores the SELinux labels cloud-init cannot set, deletes a zone file left by
+  an earlier deployment on a secondary, and fails closed if the seed delivered
+  no configuration.
 - `ultus-dns-ready.service` runs `named-checkconf` on the file, which checks
   syntax only. A secondary has no zone file until its transfer, so loading the
   zones at boot would fail every secondary.
@@ -30,20 +33,20 @@ exists.
 The pair maps to an AD-integrated DNS server plus a forwarder, or to DNS Server
 with a conditional forwarder. The zone is the AD domain zone, the forwarder is
 the recursive resolver, and the failover pair is a primary and secondary zone.
-The generated config is the Group Policy equivalent.
+The rendered configuration is the Group Policy equivalent, except that it is
+applied once at deployment and never converges afterwards.
 
 ## Where it breaks
 
-- BIND and Unbound cannot both bind `127.0.0.1:53`. The image therefore gives
-  BIND `127.0.0.2` at build time and moves it to the node address at boot.
-- A zone file written at build time cannot carry a per-run address. The image
-  ships a placeholder record for `dns-a` on `127.0.0.2`, and provisioning
-  rewrites the owner name and the address to the node's own. The rewrite is
-  idempotent.
-- A secondary must not keep the shipped zone file. The copy carries the master's
-  serial, so BIND would serve it instead of transferring, and the stale records
-  would outlive the transfer that never happened. Provisioning deletes the file
-  and its journal, and the first transfer creates them.
+- BIND and Unbound cannot both bind `127.0.0.1:53`. BIND therefore takes the
+  node's first interface address and Unbound owns loopback, which is also why
+  the health check queries `127.0.0.1` and not the node address.
+- A zone file is deployment data, not image data. The renderer derives every `A`
+  record from the spec and the delegation glue from the `[dns]` table, so the
+  addresses exist only in the seed.
+- A secondary must not keep a zone file. A copy carries the master's serial, so
+  BIND would serve it instead of transferring. The seed gives a secondary no
+  zone at all, and provisioning deletes any file an earlier deployment left.
 - `named-checkconf -z` loads zones, so it fails on a secondary before the
   transfer. The readiness unit therefore checks syntax, and the health check
   proves the zone answers.
@@ -52,10 +55,14 @@ The generated config is the Group Policy equivalent.
 - The package is built with `/etc/unbound` as its default chroot, and the unit
   is `Type=notify`. Inside that chroot the daemon cannot see
   `/run/systemd/notify` and exits at startup, while `unbound-checkconf` still
-  reports the file as valid. The config clears the chroot.
+  reports the file as valid. The rendered config clears the chroot.
+- cloud-init writes the delivered files as an unconfined process, so they
+  inherit the parent directory's label. A confined `named` cannot read
+  `etc_t` as `named_conf_t`, which is why the applier runs `restorecon` before
+  the syntax check.
 
 ## Proof
 
 ```proof
-named-checkconf -z /etc/named.conf
+test -x /usr/libexec/ultus-corp/provision.sh && systemctl is-enabled ultus-provision.service && rpm -q bind unbound
 ```

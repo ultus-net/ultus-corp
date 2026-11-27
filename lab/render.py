@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 __all__ = [
     "Lab",
+    "Dns",
+    "Delegate",
     "Site",
     "Segment",
     "Scenario",
@@ -28,15 +30,22 @@ __all__ = [
     "nodes_for",
     "primary_of",
     "secondaries_of",
-    "node_payload",
+    "zone_text",
+    "named_conf_text",
+    "unbound_conf_text",
+    "managed_files",
+    "managed_manifest",
+    "node_identity",
     "network_xml",
     "domain_xml",
     "seed_files",
     "interface_mac",
 ]
 
-TOP_KEYS = {"lab", "site", "scenario", "node"}
+TOP_KEYS = {"lab", "dns", "site", "scenario", "node"}
 LAB_KEYS = {"realm", "domain", "overlay"}
+DNS_KEYS = {"serial", "ttl", "refresh", "retry", "expire", "minimum", "delegate"}
+DELEGATE_KEYS = {"name", "ns", "address"}
 SITE_KEYS = {"id", "prefix", "segment"}
 SEGMENT_KEYS = {"name", "cidr"}
 SCENARIO_KEYS = {"id", "title", "vm_budget", "ram_budget_mib"}
@@ -59,6 +68,30 @@ class Lab:
     realm: str
     domain: str
     overlay: str
+
+
+@dataclass(frozen=True)
+class Delegate:
+    """A subdomain handed to a node that does not exist yet.
+
+    The glue address is in the spec because the delegation must be provable
+    before the identity role is built.
+    """
+
+    name: str
+    ns: str
+    address: str
+
+
+@dataclass(frozen=True)
+class Dns:
+    serial: int
+    ttl: int
+    refresh: int
+    retry: int
+    expire: int
+    minimum: int
+    delegates: tuple[Delegate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -108,6 +141,7 @@ class Node:
 @dataclass(frozen=True)
 class Spec:
     lab: Lab
+    dns: Dns
     sites: dict[str, Site]
     scenarios: dict[str, Scenario]
     nodes: list[Node]
@@ -160,6 +194,40 @@ def load(path: str | Path) -> Spec:
     if not lab.realm or not lab.domain:
         raise ValueError("[lab] realm and domain must be non-empty")
     _net(lab.overlay, "[lab] overlay")
+
+    dns_raw = doc.get("dns", {})
+    _reject_unknown(dns_raw, DNS_KEYS, "[dns]")
+    if dns_raw:
+        _require(dns_raw, {"serial"}, "[dns]")
+    delegates: list[Delegate] = []
+    for index, delegate_raw in enumerate(dns_raw.get("delegate", []), start=1):
+        where = f"[dns] delegate #{index}"
+        _reject_unknown(delegate_raw, DELEGATE_KEYS, where)
+        _require(delegate_raw, DELEGATE_KEYS, where)
+        name = str(delegate_raw["name"])
+        ns = str(delegate_raw["ns"])
+        if not name or "." in name:
+            raise ValueError(f"{where} name must be a single label: {name!r}")
+        if not ns.endswith(f".{lab.domain}."):
+            raise ValueError(f"{where} ns must end with .{lab.domain}.: {ns!r}")
+        delegates.append(
+            Delegate(
+                name=name,
+                ns=ns,
+                address=str(ipaddress.IPv4Address(str(delegate_raw["address"]))),
+            )
+        )
+    dns = Dns(
+        serial=int(dns_raw.get("serial", 1)),
+        ttl=int(dns_raw.get("ttl", 3600)),
+        refresh=int(dns_raw.get("refresh", 3600)),
+        retry=int(dns_raw.get("retry", 600)),
+        expire=int(dns_raw.get("expire", 604800)),
+        minimum=int(dns_raw.get("minimum", 300)),
+        delegates=tuple(delegates),
+    )
+    if dns.serial < 1:
+        raise ValueError("[dns] serial must be a positive integer")
 
     sites: dict[str, Site] = {}
     for index, site_raw in enumerate(doc.get("site", []), start=1):
@@ -329,7 +397,7 @@ def load(path: str | Path) -> Spec:
                 f"node {node.name} names {primary.name}, which is itself a secondary"
             )
 
-    return Spec(lab=lab, sites=sites, scenarios=scenarios, nodes=nodes)
+    return Spec(lab=lab, dns=dns, sites=sites, scenarios=scenarios, nodes=nodes)
 
 
 def primary_of(node: Node, spec: Spec) -> Node | None:
@@ -421,40 +489,148 @@ def _prefix_for(node: Node, spec: Spec, segment_name: str) -> int:
     return ipaddress.IPv4Network(cidr).prefixlen
 
 
-def node_payload(node: Node, spec: Spec) -> dict:
-    """The fact file the guest reads at /run/ultus-corp/node.json."""
-    payload: dict = {
-        "node": f"ultus-{node.scenario}-{node.name}",
-        "name": node.name,
-        "fqdn": f"{node.name}.{spec.lab.domain}",
-        "role": node.role,
-        "scenario": node.scenario,
-        "interfaces": [
-            {
-                "segment": iface.segment,
-                "address": iface.address,
-                "prefix": _prefix_for(node, spec, iface.segment),
-                "gateway": iface.gateway,
-                "nameservers": iface.nameservers,
-            }
-            for iface in node.interfaces
-        ],
-    }
+def _fqdn(name: str, spec: Spec) -> str:
+    return f"{name}.{spec.lab.domain}"
+
+
+def zone_text(node: Node, spec: Spec) -> str:
+    """The primary's zone as BIND reads it.
+
+    Every record comes from the spec: the node addresses and the delegation
+    glue. No image ships this file, so no run's address is baked into a build.
+    """
+    owner = primary_of(node, spec) or node
+    dns = spec.dns
+    lines = [
+        f"$TTL {dns.ttl}",
+        f"@   IN  SOA {_fqdn(owner.name, spec)}. hostmaster.{spec.lab.domain}. (",
+        f"        {dns.serial} ; serial",
+        f"        {dns.refresh} ; refresh",
+        f"        {dns.retry} ; retry",
+        f"        {dns.expire} ; expire",
+        f"        {dns.minimum} ) ; minimum",
+        f"@       IN  NS  {_fqdn(owner.name, spec)}.",
+    ]
+    for peer in nodes_for(spec, node.scenario):
+        lines.append(f"{peer.name}   IN  A   {peer.interfaces[0].address}")
+    for delegate in dns.delegates:
+        lines += [
+            "",
+            f"; {delegate.name} is delegated before its node exists, so the",
+            "; delegation is proven independently of that role's work.",
+            f"{delegate.name}   IN  NS  {delegate.ns}",
+            f"{delegate.name}   IN  A   {delegate.address}",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def named_conf_text(node: Node, spec: Spec) -> str:
+    """The node's named.conf, final, with no placeholder left to substitute."""
+    own = node.interfaces[0].address
+    options = [
+        "options {",
+        '    directory "/var/named";',
+        f"    listen-on port 53 {{ {own}; 127.0.0.1; }};",
+        "    listen-on-v6 { none; };",
+        "    recursion no;",
+        "    allow-query { any; };",
+        "    allow-transfer { none; };",
+        "    dnssec-validation no;",
+        "};",
+        "",
+    ]
     primary = primary_of(node, spec)
     if primary is not None:
-        # The zone comes from this address. The node's own resolver still
-        # forwards to its own named, so the two are kept as separate fields.
-        payload["secondary"] = primary.interfaces[0].address
-    peers = secondaries_of(node, spec)
-    if peers:
-        payload["secondaries"] = [peer.interfaces[0].address for peer in peers]
-    return payload
+        stanza = [
+            f'zone "{spec.lab.domain}" {{',
+            "    type secondary;",
+            '    file "lab.internal.zone";',
+            f"    masters {{ {primary.interfaces[0].address}; }};",
+            "    allow-transfer { none; };",
+            "};",
+        ]
+    else:
+        peers = [p.interfaces[0].address for p in secondaries_of(node, spec)]
+        transfer = " ".join(f"{peer};" for peer in peers) or "none;"
+        stanza = [
+            f'zone "{spec.lab.domain}" {{',
+            "    type primary;",
+            '    file "lab.internal.zone";',
+            f"    allow-transfer {{ {transfer} }};",
+        ]
+        if peers:
+            stanza.append(f"    also-notify {{ {transfer} }};")
+        stanza += ["    allow-update { none; };", "};"]
+    return "\n".join(options + stanza) + "\n"
+
+
+def unbound_conf_text(node: Node, spec: Spec) -> str:
+    """The node's resolver. It forwards the zone to its own named."""
+    own = node.interfaces[0].address
+    return (
+        "server:\n"
+        "    # The package is built with /etc/unbound as its default chroot, and the unit\n"
+        "    # is Type=notify. Inside that chroot the daemon cannot see\n"
+        "    # /run/systemd/notify, so it exits at startup with a fatal sd_notify error\n"
+        "    # while unbound-checkconf still calls the file valid.\n"
+        '    chroot: ""\n'
+        "    interface: 127.0.0.1\n"
+        "    port: 53\n"
+        "    do-not-query-localhost: no\n"
+        "    access-control: 127.0.0.0/8 allow\n"
+        "    access-control: 10.0.0.0/8 allow\n"
+        "    verbosity: 1\n"
+        "\n"
+        "forward-zone:\n"
+        f'    name: "{spec.lab.domain}"\n'
+        f"    forward-addr: {own}\n"
+    )
+
+
+def managed_files(node: Node, spec: Spec) -> dict[str, str]:
+    """Every configuration file the deployment owns, with its final content.
+
+    A secondary gets no zone: a shipped copy would carry the primary's serial,
+    so BIND would keep it instead of transferring.
+    """
+    if node.role != "dns":
+        return {}
+    files = {
+        "/etc/named.conf": named_conf_text(node, spec),
+        "/etc/unbound/unbound.conf": unbound_conf_text(node, spec),
+    }
+    if primary_of(node, spec) is None:
+        files["/var/named/lab.internal.zone"] = zone_text(node, spec)
+    return dict(sorted(files.items()))
+
+
+def managed_manifest(node: Node, spec: Spec) -> str:
+    """The expected post-deploy checksums, taken from the rendered bytes."""
+    return "".join(
+        f"{hashlib.sha256(content.encode()).hexdigest()}  {path}\n"
+        for path, content in managed_files(node, spec).items()
+    )
+
+
+def node_identity(node: Node, spec: Spec) -> dict:
+    """The identity facts the applier reads at /run/ultus-corp/node.json.
+
+    It carries no per-site value the guest could render: the configuration it
+    needs is already final in the seed.
+    """
+    return {
+        "name": node.name,
+        "fqdn": _fqdn(node.name, spec),
+        "role": node.role,
+        "scenario": node.scenario,
+        "primary": primary_of(node, spec) is None,
+    }
 
 
 def seed_files(node: Node, spec: Spec, ssh_key: str | None = None) -> dict[str, str]:
     """NoCloud seed as three strings. JSON is a valid YAML subset."""
     instance_id = f"ultus-{node.scenario}-{node.name}"
-    fqdn = f"{node.name}.{spec.lab.domain}"
+    fqdn = _fqdn(node.name, spec)
 
     meta = f"instance-id: {instance_id}\nlocal-hostname: {fqdn}\n"
 
@@ -473,6 +649,24 @@ def seed_files(node: Node, spec: Spec, ssh_key: str | None = None) -> dict[str, 
         }
     network = {"version": 2, "ethernets": ethernets}
 
+    write_files = [
+        {
+            "path": path,
+            "owner": "root:named" if path.endswith(".zone") else "root:root",
+            "permissions": "0640" if path.endswith(".zone") else "0644",
+            "content": content,
+        }
+        for path, content in managed_files(node, spec).items()
+    ]
+    write_files.append(
+        {
+            "path": "/run/ultus-corp/node.json",
+            "owner": "root:root",
+            "permissions": "0644",
+            "content": json.dumps(node_identity(node, spec), indent=2),
+        }
+    )
+
     user_data = "#cloud-config\n" + json.dumps(
         {
             "hostname": node.name,
@@ -484,13 +678,7 @@ def seed_files(node: Node, spec: Spec, ssh_key: str | None = None) -> dict[str, 
                 if ssh_key
                 else []
             ),
-            "write_files": [
-                {
-                    "path": "/run/ultus-corp/node.json",
-                    "permissions": "0644",
-                    "content": json.dumps(node_payload(node, spec)),
-                }
-            ],
+            "write_files": write_files,
             "runcmd": ["systemctl enable --now ultus-provision.service"],
         },
         indent=2,
@@ -519,6 +707,9 @@ def main(argv: list[str]) -> int:
 
     for node in nodes:
         (out / f"{node.name}.xml").write_text(domain_xml(node, spec), encoding="utf-8")
+        (out / f"{node.name}.managed-files.sha256").write_text(
+            managed_manifest(node, spec), encoding="utf-8"
+        )
         seed_dir = out / f"{node.name}-seed"
         seed_dir.mkdir(exist_ok=True)
         for name, content in seed_files(node, spec).items():
