@@ -50,10 +50,24 @@ assert_ok "core cache key covers the base modules" core_key_changes_with_modules
 assert_eq "role lock delta is a set difference" \
   "$(printf 'bind-9.18.0-1.el10.x86_64\nunbound-utils-1.20.0-1.el10.x86_64')" \
   "$(lock_delta tests/fixtures/rpm-core.txt tests/fixtures/rpm-role.txt)"
+# Duplicate lines in the image list must collapse, or the lock would name one
+# NEVRA twice and the closure check would still pass on a multiset.
+assert_eq "duplicate role lines collapse in the delta" \
+  "$(printf 'bind-9.18.0-1.el10.x86_64\nunbound-utils-1.20.0-1.el10.x86_64')" \
+  "$(lock_delta tests/fixtures/rpm-core.txt tests/fixtures/rpm-role-dup.txt)"
+# An empty core list means the role adds everything, and grep -f on an empty
+# file must not abort the run.
+assert_eq "an empty core makes the whole role list the delta" \
+  "$(printf 'bind-9.18.0-1.el10.x86_64\nbind-libs-9.18.0-1.el10.x86_64\ncloud-init-24.1-1.el10.noarch\nunbound-libs-1.20.0-1.el10.x86_64\nunbound-utils-1.20.0-1.el10.x86_64')" \
+  "$(lock_delta tests/fixtures/rpm-core-empty.txt tests/fixtures/rpm-role.txt)"
+assert_ok "an empty delta is empty" \
+  test -z "$(lock_delta tests/fixtures/rpm-role.txt tests/fixtures/rpm-role.txt)"
 assert_ok "role lock describes the image" \
   lock_covers tests/fixtures/rpm-core.txt tests/fixtures/rpm-role-lock.txt tests/fixtures/rpm-role.txt
 assert_fails "short role lock rejected" \
   lock_covers tests/fixtures/rpm-core.txt tests/fixtures/rpm-role-lock-short.txt tests/fixtures/rpm-role.txt
+assert_fails "role lock with an extra package rejected" \
+  lock_covers tests/fixtures/rpm-core.txt tests/fixtures/rpm-role-lock-extra.txt tests/fixtures/rpm-role.txt
 assert_ok    "one package per line accepted"      check_manifest_one_per_line tests/fixtures/packages-ok.txt
 assert_fails "two packages on one line rejected"  check_manifest_one_per_line tests/fixtures/packages-multi.txt
 assert_fails "key material in tree rejected"      check_no_secret_patterns tests/fixtures
