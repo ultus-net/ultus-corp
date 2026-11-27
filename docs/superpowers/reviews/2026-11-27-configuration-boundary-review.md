@@ -23,8 +23,9 @@ they are applied once and never converge afterwards.
 
 Three findings are correctness issues. Deployment values have no contract, and
 the plan already mixes a build-time script with a deployment value. Atomic
-rollback covers `/usr`, while 12 of 17 roles keep state in `/var`. Quadlet roles
-sit in a second artifact plane that the image does not own.
+rollback covers `/usr`, while 12 of the 17 roles keep state in `/var` (13 after
+the change below). Quadlet roles sit in a second artifact plane that the image
+does not own.
 
 ## 1. The model, stated precisely
 
@@ -89,14 +90,16 @@ Change: the `lab` renderer writes per-role configuration into the seed, and the
 guest copies it into place. The seed carries identity, rendered configuration and
 first-boot secret material only. It is mode 0600, never logged, and ejected and
 deleted when deployment ends; teardown tolerates its absence, so a later `up` and
-`down` still work. Cached user-data is scrubbed, because `cloud-init` retains the
-raw input under `/var/lib/cloud/instance/`. Build-time scripts enable units; they
-never consume a deployment value.
+`down` still work. A finalize unit writes one deployment record, scrubs the
+cached user-data, and marks the host ready; `cloud-init` retains the raw input
+under `/var/lib/cloud/instance/` until that runs. Build-time scripts enable
+units; they never consume a deployment value.
 
 ### F2. Atomic rollback is not a data rollback (P1)
 
 The draft promises "atomic upgrade and rollback" in D1 (`:224`) and proves it in
-s0 (`:149`), which boots one stateless role.
+s0 (`:149`), which boots the DNS primary. That role is application state under
+the profile table, so s0 proves the image path only.
 
 Twelve of the 17 roles in the roles table are stateful (`:326-344`): nine carry
 application state (dhcp, pki, ipa, app, registry, mon, secrets, mdm, ipam) and
@@ -199,7 +202,7 @@ list names five families: FreeIPA, Keycloak, Kea, NetBox, Fleet.
 
 | Tool | Role | Why |
 | --- | --- | --- |
-| bootc | image build, transport, atomic deploy | Makes the deployed state one digest, which is the property the model needs |
+| bootc | image build, transport, atomic deploy | Makes the bootc-managed OS filesystem one digest, which is the property the model needs |
 | cloud-init + NoCloud seed | one-shot deployment inputs | Already the chosen path (D11); narrow it and control its lifecycle |
 | `lab` renderer | spec to domain XML, seed and per-role files | Deterministic, stdlib only, and the branch-as-data requirement depends on it |
 | systemd oneshots | first-boot installs | No extra control plane, and the unit is testable inside the image |
@@ -224,8 +227,8 @@ Supply-chain position, checked 2026-11-27:
 - Open-source Puppet was discontinued in late 2024. The community continuation
   is OpenVox, at 9.x, and a critical server RCE was fixed in November 2026.
 - Chef Infra Server 15 is deprecated with an EOL of 2026-11-30 and is replaced
-  by the SaaS Chef 360 Platform. Automated download of Chef Infra Client 19
-  requires a licence key.
+  by the Chef 360 Platform. The commercial install path requires a licence ID,
+  so an unattended download needs one.
 - Salt 3008 removed a large set of modules from core, and the published
   lifecycle stops at 3008 LTS.
 
@@ -266,9 +269,10 @@ The spec commit accepts the findings into the draft:
 - D21: Quadlets as bootc logically bound images, pinned by digest, read through
   the additional image store, and preloaded so a cold boot with egress off works.
 - `§Configuration and deployment inputs`: the four-layer model, the seed
-  contract, the secrecy lifecycle, and when deployment ends.
-- Gates 10 to 13: managed-file integrity, deployment counts, rollback by class,
-  and build reproducibility.
+  contract, the secrecy lifecycle, the deployment record, and when deployment
+  ends.
+- Gates 10 to 13: managed-file integrity, the deployment record, rollback by
+  class, and build reproducibility.
 - Risk rows for stateful rollback, the seed ISO, a missing bound image on a cold
   boot, and mutable Stream repositories.
 - The missing server install medium in `§Not proven here`.
@@ -278,18 +282,23 @@ addition remains Ansible behind the trigger in section 4.
 
 ## 6. Plan impact
 
-The review is a spec change, but three P0 tasks must follow or the gates are
+The review is a spec change, but the P0 tasks must follow or the gates are
 aspirational:
 
 | Plan task | Change |
 | --- | --- |
 | Task 3, `Containerfile.dns` | Consume the resolved NEVRA lock instead of `packages.txt` |
+| Task 4, renderer | Render per-role configuration, and write a `deployment_id` into `meta-data` and the seed manifest |
+| Task 5, `lab` CLI | Eject and delete the seed when `ultus-deploy-ready` is reached, record it as consumed, and let teardown tolerate its absence |
+| Task 6, `s0-base` | Ship `ultus-deploy-finalize.service` and `ultus-deploy-ready.target`; gate 11 reads `deployment.json` |
 | Task 7, `s1-dns` | Render `also-notify` and `allow-transfer` at deploy; move `lab.internal.zone` out of `/var` |
-| The gate tasks | Add the managed-file manifest, the invocation counts, one negative hand-edit test, and the lock gate |
+| Task 8, CI | Wire gates 10 to 13, including the negative hand-edit test and the lock check |
+| First Quadlet role, s5 `app` | Preload the bound images and add the cold boot with egress off |
 
-P0 proves s0, which is stateless. The first stateful plan must add one upgrade
-and restore, or F2 stays untested. Gate 12 is not a P0 exit criterion: it stays
-open until one role from each class has run.
+P0 proves s0, which boots the DNS primary. The s0 scenario asserts lookup and
+delegation, not restore, so it does not satisfy gate 12. The first plan that adds
+application state must add one upgrade and restore, or F2 stays untested. Gate 12
+stays open until one role from each class has run.
 
 ## 7. What would change this recommendation
 
@@ -323,7 +332,8 @@ External:
 - OpenVox 9 release notes: <https://docs.openvoxproject.org/openvox/latest/release_notes.html>
 - OpenVox critical CVE, November 2026: <https://voxpupuli.org/blog/2026/11/03/critical-cve-updates/>
 - Chef supported versions: <https://docs.chef.io/versions/>
-- Chef Infra Client 19 licence key: <https://www.chef.io/blog/progress-chef-infra-client-19-release>
+- Chef install script and licence ID: <https://docs.chef.io/chef_install_script/>
+- Chef licensing: <https://docs.chef.io/licensing/>
 - Salt lifecycle: <https://docs.saltproject.io/salt/install-guide/en/latest/topics/salt-version-support-lifecycle.html>
 - Salt module migration: <https://saltproject.io/blog/the-great-salt-module-migration/>
 - NetBox irreversible migration: <https://github.com/netbox-community/netbox/issues/17830>

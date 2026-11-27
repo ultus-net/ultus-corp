@@ -2,8 +2,8 @@
 
 **Status:** draft for approval, 2026-11-26
 **Scope:** a three-branch company with a data-centre hub, built from CentOS
-Stream 10 bootc images and run as libvirt VMs. It starts with stateless
-services, then adds the directory, the IdP, endpoint management and the stateful
+Stream 10 bootc images and run as libvirt VMs. It starts with one service and
+its zone, then adds the directory, the IdP, endpoint management and the stateful
 roles a corporate network actually needs. Every component is designed and tested
 as its own bounded scenario, and the full topology is never resident.
 **Relationship:** independent of `infra-overhaul`. It may later supply images,
@@ -267,21 +267,29 @@ Rules:
 3. The seed carries deployment inputs only: identity, the rendered per-role
    configuration, and the secret material a role needs at first boot. It carries
    no packages and no build steps.
-4. `cloud-init` runs once per instance. The seed is mode 0600 and is never
-   logged. When deployment ends, the `lab` CLI ejects the seed from the live and
-   persistent domain definitions, deletes it, and marks it consumed so teardown
-   tolerates its absence. Cached user-data is scrubbed. The gate asserts that
-   one-time secrets are absent from the cloud-init cache and the logs, and that
-   the seed file is gone.
+4. Only the per-instance configuration runs once. `cloud-init`'s per-boot
+   stages still run. The seed is mode 0600 and is never logged. When deployment
+   ends, the `lab` CLI ejects the seed from the live and persistent domain
+   definitions, deletes it, and marks it consumed so teardown tolerates its
+   absence. Cached user-data is scrubbed. The gate asserts that one-time secrets
+   are absent from the cloud-init cache and the logs, and that the seed file is
+   gone.
 5. A role that needs a first-boot install ships an idempotent, fail-closed
    oneshot unit. That install may write `/etc` and `/var`, enable units, and
    render the vendor's own configuration from the supplied inputs. It never runs
    a `lab` template. Deployment ends when `cloud-init` and the role's installer
    both report success; before that the host is not in service.
-6. After deployment ends, nothing converges configuration. Applications may
+6. Every role image ships `ultus-deploy-finalize.service`, ordered after
+   `cloud-final.service` and the role's installer. It is guarded by
+   `ConditionPathExists=!/var/lib/ultus-corp/deployment.json` and writes that
+   file once, with the deployment id, the image digest, the role and the
+   completion time. It also scrubs the cloud-init instance cache and removes
+   one-time secret material. `ultus-deploy-ready.target` is reached when the
+   file exists.
+7. After deployment ends, nothing converges configuration. Applications may
    write their own state under `/var`. Runtime automation may change API objects
    only.
-7. A drifted host is re-rendered from the repository or replaced, not repaired.
+8. A drifted host is re-rendered from the repository or replaced, not repaired.
 
 ## Rollback and upgrade
 
@@ -298,6 +306,10 @@ from it.
 | Config-only | dns (secondary), edge, radius | previous image plus the previous seed |
 | Application state | dns (primary), dhcp, pki, ipa, app, registry, mon, secrets, mdm, ipam | quiesce writes, back up with the application's tool, restore into the matching image |
 | File-backed | deploy, print, file | quiesce, back up the share, restore into the matching image |
+
+s0 exercises the image rollback path on the DNS primary before that host holds
+runtime zone data. It does not prove the application-state restore, even though
+the DNS primary belongs to that class.
 
 ## Target architecture
 
@@ -526,9 +538,10 @@ docs/                           design, plans, runbooks
     files, against its expected post-install state. It asserts the manifest is
     unchanged after a second boot, and fails when a negative test hand-edits one
     managed file.
-11. Deployment: the per-instance deployment application reports exactly one
-    success after two boots. `cloud-init` per-boot stages are excluded from the
-    count. The seed is ejected and deleted, and the cached user-data is scrubbed.
+11. Deployment: `/var/lib/ultus-corp/deployment.json` exists after two boots,
+    records one deployment id with the expected image digest and role, and the
+    finalize unit's journal shows one start. The seed is ejected and deleted,
+    and the cached user-data is scrubbed.
 12. Rollback: one role from each class in `§Rollback and upgrade` is exercised.
     A stateless role returns to the previous image, a config-only role to the
     previous image and seed, and a stateful role restores its backup into the
