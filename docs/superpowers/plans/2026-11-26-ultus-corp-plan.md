@@ -30,6 +30,12 @@ plan's step syntax, not its progress record. This table is the progress record.
 | 11 s1 evidence run | blocked on the rootful disk build | `tests/scenarios/s1-dns.sh` |
 | greenboot rollback | built, not yet booted | `run/evidence/greenboot.log`, `tests/scenarios/greenboot-rollback.sh` |
 
+PR [#7](https://github.com/ultus-net/ultus-corp/pull/7) carries Tasks 8-10 and
+the rollback proof. Task 11 stays open until the disk is rebuilt on this host:
+the cached disks predate the role image that carries the deployment contract,
+so `s0-base`, `s1-dns` and the rollback proof have no current hypervisor
+evidence.
+
 Three things changed after the design was merged, and the task text below
 reflects them: the core image split (Task 2), the lab-rendered DNS configuration
 replacing the build-time placeholder (Tasks 3, 4 and 7), and the deployment

@@ -45,3 +45,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - fix: the rollback proof reads the guest's boot id, so a reboot that never happened fails fast rather than being absorbed by the rollback timeout; the failing layer is built from the image id recorded beside the disk, not from whatever the local tag points at
 - fix: the isolation gate proves the path-scoped secret and media scans still catch the deliberate fixtures, and `lab doctor --host-uplinks` prints canonical networks that the gate parses strictly
 - fix: the `s1-dns` negative zone assertion is a direct negative check, not a `grep … || true` that passes on empty output
+- docs: plan status links PR #7 and keeps Task 11 open until the disk rebuild, because the cached disks predate the role image
