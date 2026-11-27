@@ -51,7 +51,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        role: [dns]
+        include:
+          - role: dns
+            tests: bash tests/test-packages.sh && bash tests/test-provision.sh
+          - role: dhcp
+            tests: bash tests/test-dhcp.sh
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -81,8 +85,7 @@ jobs:
           image="$REGISTRY/ultus-corp-$role:${{ github.sha }}"
           podman tag "$(lab_image "$role")" "$image"
           podman push "$image"
-      - run: bash tests/test-packages.sh
-      - run: bash tests/test-provision.sh
+      - run: bash -c "${{ matrix.tests }}"
 
   render:
     runs-on: ubuntu-latest
@@ -106,6 +109,9 @@ jobs:
   supply:
     needs: build
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        role: [dns, dhcp]
     steps:
       - uses: actions/checkout@v7
       - uses: sigstore/cosign-installer@v3
@@ -121,7 +127,7 @@ jobs:
       - name: The scanned artifact is the signed artifact
         run: |
           set -euo pipefail
-          image="$REGISTRY/ultus-corp-dns:${{ github.sha }}"
+          image="$REGISTRY/ultus-corp-${{ matrix.role }}:${{ github.sha }}"
           # The pushed image is the one to sign, and its repository digest is
           # only known after the pull. Reading it from the pull keeps the scan,
           # the SBOM and the signature on the same bytes.

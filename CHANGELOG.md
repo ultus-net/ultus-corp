@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+- feat: the dhcp role ships a Kea server and a dnsmasq relay
 - refactor: share the deployment gate and the provision unit across roles
 - feat: render a cross-site interface and a DHCP client mode
 - chore: merge the updated design from `main` and the delivery model from `docs/branch-footprint`, which `main` never received; the design now carries one sequence of decisions D1 to D33 and gates 1 to 16
