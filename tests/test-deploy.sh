@@ -31,6 +31,11 @@ assert_ok "the role install target pulls the applier" podman run --rm "$img" \
   test -L /etc/systemd/system/ultus-role-install.target.wants/ultus-provision.service
 assert_ok "the applier is ordered before the role install target" podman run --rm "$img" \
   bash -c "grep -q 'Before=.*ultus-role-install.target' '/usr/lib/systemd/system/ultus-provision.service'"
+# The applier restarts named and unbound itself. Ordering those units after it
+# would make the queued restart wait for the applier, which waits for the
+# restart: a deadlock observed on the first hypervisor boot.
+assert_ok "the applier is not ordered before the vendor services" podman run --rm "$img" \
+  bash -c "! grep -q 'Before=.*named.service' '/usr/lib/systemd/system/ultus-provision.service'"
 assert_ok "finalize is conditioned on the record" podman run --rm "$img" \
   bash -c "grep -q 'ConditionPathExists=!/var/lib/ultus-corp/deployments/%i.json' '/usr/lib/systemd/system/ultus-deploy-finalize@.service'"
 assert_ok "finalize is ordered before the ready target" podman run --rm "$img" \

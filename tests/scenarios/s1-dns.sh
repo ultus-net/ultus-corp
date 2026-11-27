@@ -15,7 +15,7 @@ PY
 )
 read -r addr_a addr_b <<< "$addresses"
 id_a=$(python3 -c 'import json,os;print(json.load(open(os.environ["RUN"] + "/s1-dns/state.json"))["nodes"]["dns-a"]["deployment_id"])')
-digest_a=$(python3 -c 'import json,sys;print(json.load(open("run/s1-dns/state.json"))["deployments"][sys.argv[1]]["image_digest"])' "$id_a")
+digest_a=$(python3 -c 'import json,os,sys;print(json.load(open(os.path.join(os.environ["RUN"], "s1-dns/state.json")))["deployments"][sys.argv[1]]["image_digest"])' "$id_a")
 
 guest() {
   local addr=$1
@@ -27,7 +27,7 @@ guest() {
 
 manifest_ok() {
   local addr=$1 node=$2
-  guest "$addr" 'sha256sum -c -' < "run/s1-dns/render/$node.managed-files.sha256"
+  guest "$addr" 'sha256sum -c -' < "$RUN/s1-dns/render/$node.managed-files.sha256"
 }
 
 assert_eq "primary domain running" "running" "$(virsh domstate ultus-s1-dns-dns-a)"
@@ -71,14 +71,14 @@ assert_eq "finalize is active for this deployment" "active" \
 assert_ok "cloud-init instance cache is scrubbed" \
   guest "$addr_a" test ! -e /var/lib/cloud/instance
 assert_ok "the seed is marked consumed" python3 - <<'PY'
-import json
-state = json.load(open("run/s1-dns/state.json"))
+import json, os
+state = json.load(open(os.path.join(os.environ["RUN"], "s1-dns/state.json")))
 seeds = [r for r in state["resources"] if r["kind"] in {"seed", "seediso"}]
 assert seeds, state["resources"]
 assert all(r.get("consumed") for r in seeds), seeds
 PY
 assert_ok "the ejected seed file is gone" \
-  bash -c "! test -e run/s1-dns/ultus-s1-dns-dns-a-seed.iso"
+  bash -c "! test -e \"$RUN/s1-dns/ultus-s1-dns-dns-a-seed.iso\""
 
 record_before=$(guest "$addr_a" "sha256sum $record")
 

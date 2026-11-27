@@ -31,7 +31,7 @@ digest_of() {
 }
 
 manifest_ok() {
-  guest 'sha256sum -c -' < run/s1-dns/render/dns-a.managed-files.sha256
+  guest 'sha256sum -c -' < "$RUN/s1-dns/render/dns-a.managed-files.sha256"
 }
 
 assert_ok "the good image matches its manifest" manifest_ok
@@ -42,17 +42,19 @@ record_before=$(guest "sha256sum $record")
 # on whatever the local tag points at now. A rollback then returns to an image
 # whose only difference is the check that never belonged there.
 dns_id=$(cat "$volume.id")
-cat > run/broken.Containerfile <<EOF
+cat > "$RUN/broken.Containerfile" <<EOF
 FROM $dns_id
 COPY tests/fixtures/greenboot/99-broken.sh /usr/lib/greenboot/check/required.d/99-broken.sh
 EOF
 assert_ok "the failing image builds" podman build -t localhost/ultus-corp/broken:local \
-  -f run/broken.Containerfile .
+  -f "$RUN/broken.Containerfile" .
 assert_ok "the failing image loads into the guest's archive" \
-  bash -c "podman save -o run/broken.tar localhost/ultus-corp/broken:local && chmod 0644 run/broken.tar"
+  bash -c "podman save -o \"$RUN/broken.tar\" localhost/ultus-corp/broken:local && chmod 0644 \"$RUN/broken.tar\""
 
+# virsh needs an absolute path; the run tree may be relative or under LAB_RUN_DIR.
+run_abs=$(cd "$RUN" && pwd)
 assert_ok "the archive disk attaches" \
-  virsh attach-disk ultus-s1-dns-dns-a "$PWD/run/broken.tar" vdb \
+  virsh attach-disk ultus-s1-dns-dns-a "$run_abs/broken.tar" vdb \
   --live --config --targetbus virtio --sourcetype file
 assert_ok "the guest imports the failing image" guest 'podman load -i /dev/vdb'
 assert_ok "the candidate is present in the guest" \
@@ -107,6 +109,6 @@ lab down s1-dns
 assert_ok "no domain left" bash -c "! virsh list --all --name | grep -q ultus-s1-dns"
 assert_ok "the archive disk is gone with the domain" \
   bash -c "! virsh domblklist ultus-s1-dns-dns-a 2>/dev/null | grep -q broken.tar"
-python3 -c 'import pathlib; [pathlib.Path(p).unlink(missing_ok=True) for p in ("run/broken.tar", "run/broken.Containerfile")]'
+python3 -c 'import pathlib,sys; [pathlib.Path(sys.argv[1], p).unlink(missing_ok=True) for p in ("broken.tar", "broken.Containerfile")]' "$RUN"
 
 finish
