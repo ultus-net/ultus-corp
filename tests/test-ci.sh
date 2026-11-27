@@ -21,6 +21,12 @@ assert_ok "the role build names the core digest" grep_ci 'build-arg CORE'
 assert_ok "supply needs the build" grep_ci 'needs: build'
 assert_ok "trivy fails on a critical finding" grep_ci 'exit-code: "1"'
 assert_ok "trivy scans for critical findings" grep_ci 'severity: CRITICAL'
+# A tag that does not exist fails the job before any step runs, as 0.28.0 did.
+assert_ok "trivy is pinned to a release" \
+  bash -c "grep -qE 'aquasecurity/trivy-action@v?[0-9]+\\.[0-9]+\\.[0-9]+' '$ci'"
+assert_ok "the supply job authenticates before it scans" \
+  bash -c "awk '/--authfile/{a=NR} /trivy-action/{t=NR} END{exit !(a && t && a < t)}' '$ci'"
+assert_ok "the signed digest comes from the pulled image" grep_ci 'RepoDigests'
 assert_ok "an SBOM is produced" grep_ci 'sbom.spdx.json'
 assert_ok "cosign signs a digest" bash -c "grep -q 'cosign sign --yes' '$ci' && grep -q '@\$DIGEST' '$ci'"
 

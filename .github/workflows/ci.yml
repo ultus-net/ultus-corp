@@ -109,14 +109,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: sigstore/cosign-installer@v3
+      # Trivy, syft and cosign all read the Docker config, so one login here
+      # covers the scan, the SBOM and the signature push.
+      - name: Authenticate to the registry
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.docker"
+          echo "${{ github.token }}" | podman login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin \
+            --authfile "$HOME/.docker/config.json"
       - name: The scanned artifact is the signed artifact
         run: |
           set -euo pipefail
           image="$REGISTRY/ultus-corp-dns:${{ github.sha }}"
-          digest=$(skopeo inspect --format '{{.Digest}}' "docker://$image")
+          # The pushed image is the one to sign, and its repository digest is
+          # only known after the pull. Reading it from the pull keeps the scan,
+          # the SBOM and the signature on the same bytes.
+          podman pull "$image"
+          digest=$(podman image inspect \
+            --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" \
+            | sed -n 's/.*@\(sha256:[0-9a-f]\{64\}\)$/\1/p' | head -n 1)
+          test -n "$digest" || { echo "no registry digest for $image" >&2; exit 1; }
           echo "IMAGE=$image" >> "$GITHUB_ENV"
           echo "DIGEST=$digest" >> "$GITHUB_ENV"
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}@${{ env.DIGEST }}
           exit-code: "1"
