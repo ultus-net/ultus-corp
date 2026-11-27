@@ -568,6 +568,9 @@ git commit -m "feat: s1-dns primary, secondary and delegation"
 **Interfaces:**
 - Consumes: `tests/test-static.sh`, `tests/test-image.sh`, `tests/test-packages.sh`, `tests/test_render.py`, `tests/test-lab.sh`.
 - Produces: a CI gate that fails on any of those, and a weekly digest bump PR.
+- Produces: the seed of pipeline A. `ci.yml` qualifies and `repin-base.yml` is
+  the watcher. Pipeline B, the on-host probe and the dead-man controllers land in
+  the delivery plan.
 
 - [ ] **Step 1: Write the failing check**
 
@@ -652,8 +655,9 @@ git commit -m "feat: isolation gate and P0 runbooks"
 static, build, image, scenario, teardown, supply-chain and isolation gates are
 Tasks 1, 2, 3, 6, 5, 8 and 9. The scenario model's five rules are covered by
 Tasks 4 and 5. Not in this plan, by design: s2 and later scenarios, assembly
-runs, identity, endpoints and stateful roles. Each becomes its own plan, in the
-design's scenario order, because each is an independent subsystem.
+runs, identity, endpoints, stateful roles and delivery operations. Each becomes
+its own plan, in the design's scenario order, because each is an independent
+subsystem.
 
 **Step scan.** Every step names a file, a command and an expected result. The
 renderer step states the MAC derivation and the no-dnsmasq rule because a
@@ -681,3 +685,4 @@ are fixtures, assertions and one image reference, not implementation bodies.
 | 4 | s6, s9 | 802.1X and endpoint onboarding |
 | 5 | s7, s8 | Delivery and observability |
 | 6 | s10, assembly | Stateful roles, then the assembly gates |
+| 7 | s7, s8, fleet | Pipeline A qualification, pipeline B promotion, the on-host probe and the dead-man controllers; the lab gates are not a fleet controller |
