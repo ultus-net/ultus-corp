@@ -17,7 +17,8 @@ core_ref() {
 
 # Podman resolves `repo@sha256:<id>` against a registry unless that digest is
 # already a repo digest, and a locally built image has none. The build argument
-# is therefore the bare digest, which resolves in the local store.
+# is therefore the digest without a repository, `sha256:<id>`, which resolves
+# in the local store.
 core_digest() {
   local ref
   ref=$(core_ref)
@@ -79,7 +80,10 @@ build_core() {
     -t "$(core_image)" . || return 1
   podman run --rm "$(core_image)" bootc container lint || return 1
   id=$(podman image inspect --format '{{.Id}}' "$(core_image)")
-  printf '%s@%s\n' "$(core_image)" "$id" > manifests/core.txt
+  # A reference digest always carries the algorithm. A bare id here made the
+  # artifact fail the check its own fixture passes, and CI compared it with a
+  # prefixed id, so the job failed on the prefix alone.
+  printf '%s@sha256:%s\n' "$(core_image)" "$id" > manifests/core.txt
   printf '%s\n' "$inputs" > manifests/core.inputs
 }
 
