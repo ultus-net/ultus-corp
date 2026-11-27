@@ -115,10 +115,11 @@ A change counts as a failure, even if it works, when it:
   or Debian guest.
 - The lab guests have no internet by default. The build host and CI do. The DC
   hub is the only runtime egress, and it is a toggle.
-- macOS cannot be virtualised on non-Apple hardware. A macOS client is a
-  generated configuration profile that a real Mac installs, never a VM.
-- Full MDM enrolment of Apple devices needs APNs and an Apple ID, and Windows
-  Autopilot needs Entra. Both are documented variants, not the default path.
+- macOS cannot be virtualised on non-Apple hardware. It is documented, not built
+  or booted here.
+- Workstation MDM is out of scope. No Apple device enrolment, no Windows
+  Autopilot, and no APNs or Entra dependency. Fleet provides inventory and
+  policy only.
 - Windows and macOS installation media are downloaded by the operator and
   never committed.
 - Every credential is generated once and kept outside the repository.
@@ -197,7 +198,7 @@ green scenario proves the whole network.
 
 | Approach | What you get | Why not |
 | --- | --- | --- |
-| **A. Fleet for inventory and policy, PXE for installs** | One management plane for Linux and Windows, osquery visibility, and onboarding from a blank VM. | Chosen. Windows MDM enrolment needs verification, and Apple is documented. |
+| **A. Fleet for inventory and policy, PXE for installs** | One management plane for Linux and Windows, osquery visibility, and onboarding from a blank VM. | Chosen. Fleet is inventory and policy, not MDM. Apple and Windows MDM are out of scope. |
 | B. Client VMs only, no management plane | Cert trust, 802.1X and SSO tested per OS. | Onboarding is hand-run, which is the thing a corporate network never does. |
 | C. A real Intune tenant | The production shape. | Needs Entra, the internet, and a licence, which breaks isolation and the public repo. |
 
@@ -237,7 +238,7 @@ library, so the renderer needs no dependency at all.
 | D14 | Lab unit | One scenario per component, run and torn down alone | The design is complete while the resident footprint is one bounded component, so it fits hardware on hand and costs nothing | A resident topology; graduated `--profile` sets |
 | D15 | Licence and visibility | Public, MIT, generic | A reference design should be readable | Private; AGPL |
 | D16 | Overlay growth | BGP over the tunnels is the first scaling step, then direct paths, then a second hub | FRR already ships in the edge image, so growth is config, not a redesign | Hand-editing a full mesh |
-| D17 | Endpoint management | Fleet for inventory and policy, PXE for Linux and WinPE, macOS by profile | One plane for a mixed fleet, and onboarding from blank | Intune, which needs Entra; client VMs only, which leaves onboarding manual |
+| D17 | Endpoint management | Fleet for inventory and policy, PXE for Linux and WinPE. No workstation MDM | One inventory and onboarding plane, without an Apple or Entra dependency | Intune, which needs Entra; an MDM stack, which needs APNs or Autopilot; client VMs only, which leaves onboarding manual |
 | D18 | 802.1X authenticator | `hostapd` with the wired driver on the users bridge | Gives real supplicants a real authenticator, not just `eapol_test` | `eapol_test` only, which proves the server and nothing else |
 | D19 | Integration evidence | A static interface-composition check plus a dated assembly run | Composition is checked continuously where it can be, and sampled where it cannot | Assuming a green scenario proves the network |
 | D20 | Rollback contract | The class belongs to each data store, not the role. Stateless roles redeploy the previous image; config-only roles redeploy the previous image and seed; durable stores are quiesced, backed up with the application's tool and restored into a matching image; rebuildable stores are wiped and re-created from the repository, a peer or upstream, with the accepted loss declared. A role can hold both, and `app` does. Gate 12 exercises one store per class, and gate 14 tests the declared loss | `/var` persists across deployments, and database schemas are not reliably reversible. Not all `/var` data is authoritative: DHCP leases, registry and proxy caches, monitoring history and deployment artifacts are rebuildable. Treating them as durable adds a backup burden that protects nothing | Treating `bootc rollback` as a data rollback; one generic snapshot rule for every role; backing up data that is cheaper to recreate |
@@ -320,7 +321,7 @@ can hold a durable store and a rebuildable one.
 | app | both | Keycloak realms rebuild from the repo; Gitea repositories are durable |
 | registry | rebuildable | pull-through cache; it re-pulls |
 | mon | rebuildable | metrics and logs; history is lost, and that loss is declared |
-| mdm | rebuildable | Fleet enrolment re-establishes; policies are in the repo |
+| fleet | rebuildable | Fleet enrolment re-establishes; policies are in the repo |
 | deploy | rebuildable | artifacts re-sync from upstream |
 | print | rebuildable | the spool is re-queued; printer configuration is rendered |
 | ipam | rebuildable | NetBox content is declared in `lab.toml`; ad-hoc objects are not durable |
@@ -333,6 +334,10 @@ For a rebuildable store the repository, a peer or upstream is the source of
 truth. An API object that matters is promoted into the repository, or it is not
 durable. A durable store is never silently recreated, and a rebuildable store is
 never backed up.
+
+A redeployment is a new VM. It starts from the image and a fresh seed, and only
+durable stores are restored. Every rebuildable store is re-created, and its loss
+is the list declared for it.
 
 s0 builds the DNS store from the seed on a fresh host. It proves the image
 rollback path, not a wipe of an existing store and not a durable restore.
@@ -373,7 +378,7 @@ flowchart TB
   HUB --- REG
   HUB --- MON
   HUB --- AUX
-  C1 -->|PXE and MDM| AUX
+  C1 -->|PXE and inventory| AUX
 ```
 
 ## Addressing and naming
@@ -414,13 +419,14 @@ flowchart TB
 | --- | --- | --- | --- |
 | PXE install | iPXE and kickstart | iPXE, wimboot and WinPE | none, documented |
 | Directory | FreeIPA client | none, local account plus OIDC | none, local account plus OIDC |
-| Management | Fleet agent | Fleet agent, manual enrolment to verify | profile only, needs APNs |
+| Management | Fleet agent | Fleet agent, manual enrolment to verify | out of scope; no MDM |
 | Certificate trust | `update-ca-trust` | script or profile | `.mobileconfig` |
 | 802.1X | wpa_supplicant | native supplicant | native profile |
 | App SSO | OIDC | OIDC | OIDC |
 
-macOS is the documented column. It cannot run on this host, so its profile is
-generated, schema-checked and handed to a real Mac, not booted here.
+macOS is documentation only. It cannot run on this host, so the macOS column
+records what a real Mac would need, not what this lab proves. Workstation MDM is
+out of scope, so no configuration profile is generated or validated.
 
 ## Roles and images
 
@@ -438,7 +444,7 @@ generated, schema-checked and handed to a real Mac, not booted here.
 | s7 | registry | pull-through cache and mirror | yes |
 | s8 | mon | Prometheus, Loki, Grafana | yes |
 | s8 | secrets | OpenBao | yes |
-| s9 | mdm | Fleet, MySQL | yes |
+| s9 | fleet | Fleet, MySQL | yes |
 | s9 | deploy | iPXE, TFTP, HTTP, WinPE | yes, small |
 | s10 | print | CUPS | yes |
 | s10 | file | Samba | yes |
@@ -467,7 +473,7 @@ enablement.
 | s6-radius | FreeRADIUS, `hostapd` wired authenticator, a Linux supplicant | `eapol_test` passes, then a real supplicant completes EAP-TLS |
 | s7-delivery | Registry mirror, egress toggle, pull-through | A guest pulls an image through the hub with egress off, and egress on only for updates |
 | s8-observe | Prometheus, Loki, Grafana, OpenBao | Every role in the scenario emits metrics and logs, and a secret rotates without a rebuild |
-| s9-endpoints | Fleet, PXE, WinPE, a Windows client, the macOS profile | A blank VM PXE-boots to an installer, Windows trusts the root and completes EAP-TLS, and the macOS profile validates |
+| s9-endpoints | Fleet, PXE, WinPE, a Windows client | A blank VM PXE-boots to an installer, Fleet shows the client, and Windows trusts the root and completes EAP-TLS |
 | s10-stateful | Print, file, IPAM | Print survives a node loss, IPAM is the address source of truth, and a backup restores |
 | assembly-min | Every role that the minimum topology needs, at once | Hub, branch 1, identity and one client work together, and an OIDC login crosses all of them |
 | assembly-branches | Branches 2 and 3 added as spec entries | Adding branch 3 is one spec entry and one address block, and cutting a branch overlay leaves it resolving, leasing and telling time |
@@ -541,7 +547,7 @@ build/                          common.sh, manifest.sh, package-lock.sh
 modules/<role>/                 files copied onto /
 overlay/                        files every role gets
 lab/                            lab.toml, renderer, scenarios, seeds
-endpoints/                      kickstart, WinPE answer files, macOS profile
+endpoints/                      kickstart and WinPE answer files
 tests/                          static gate, image gate, VM harness
 docs/                           design, plans, runbooks
 .github/workflows/              ci.yml, repin-base.yml
@@ -610,7 +616,7 @@ The builder check raised ten questions. All now have a call.
 | Runtime egress | Deny by default. The DC hub is the only egress, and `lab egress on` enables it for updates. |
 | Root CA storage | Encrypted with age in `lab-secrets/`, excluded from git, with the passphrase kept offline. Root generation is a one-time operator script. CI generates a throwaway root per run. |
 | Bootstrap automation | Everything except the operator's root CA, the FreeIPA admin password and the Windows image are automated. All three are runbook steps. |
-| External services | None by default. APNs and Entra are recorded as an egress variant for Apple and Autopilot enrolment, not the lab path. |
+| External services | None by default, and none required. Workstation MDM is out of scope, so there is no APNs or Entra dependency. |
 | Versions and crypto | Pin to Stream 10's shipped NEVRAs plus digest-pinned containers. System crypto policy DEFAULT. |
 | Host NICs | One 1 GbE NIC, no VLAN or SR-IOV requirement. Segmentation is one libvirt internal network per segment, never a bridge to the LAN. |
 
@@ -659,7 +665,7 @@ Two consequences, both already reflected in the plan:
 | libvirt tooling absent | s0 cannot start | Install libvirt, `virt-install` and a seed ISO tool, then prove one guest boots |
 | `hostapd` wired driver is unproven here | Real supplicants cannot complete 802.1X | Verify it in s6 before the endpoint gate; `eapol_test` remains the server proof |
 | EAP-TLS is not the vendor recipe | A Windows supplicant may fail where EAP-TTLS would pass | s6 proves EAP-TLS with a real supplicant, and EAP-TTLS plus LDAP is the documented fallback |
-| Fleet Windows enrolment is uneven | Windows shows inventory but not full MDM | Verify manual enrolment early; document Intune for the production path |
+| Fleet Windows enrolment is uneven | Windows shows no inventory | Verify manual enrolment early; the Windows evidence is certificate trust and EAP-TLS, not inventory |
 | Windows PXE is WinPE, not Autopilot | The onboarding story differs from a real estate | Record the gap in the endpoint runbook |
 | FreeIPA and BIND fight over a zone | Duplicate or missing records | FreeIPA owns `ipa.lab.internal`; BIND delegates it |
 | FreeIPA install needs working DNS and clock | A failed install on first boot | Order s1 before s5, and assert clock and forwarders |
@@ -670,8 +676,8 @@ Two consequences, both already reflected in the plan:
 
 - s5 application set: Gitea or Forgejo, and the Grafana stack or
   VictoriaMetrics.
-- Whether the APNs and Entra egress variant is worth building, or only
-  documenting.
+- Whether Fleet inventory earns its own role, or PXE plus per-OS checks is
+  enough.
 - Whether Proxmox parity is wanted once the libvirt lab is stable.
 - Whether the assembly run ever moves to the EliteDesk, so the desktop never
   has to stop.
@@ -690,8 +696,6 @@ Two consequences, both already reflected in the plan:
   the add-a-branch test.
 - Prove the `hostapd` wired authenticator with the Windows native supplicant.
 - Build the PXE path for Linux first, then WinPE, and record what differs.
-- Generate and schema-check the macOS profile from the same PKI the other
-  clients use.
 - Write the step-ca and FreeIPA CA bootstrap so the root never enters the repo.
 - Write the interface declarations per scenario, and the static check that
   composes them.

@@ -104,7 +104,7 @@ rebuildable, so s0 proves the image path and a fresh build, not a wipe and not a
 durable restore.
 
 Twelve of the 17 roles in the roles table keep data (`:326-344`): nine carry
-application data (dhcp, pki, ipa, app, registry, mon, secrets, mdm, ipam) and
+application data (dhcp, pki, ipa, app, registry, mon, secrets, fleet, ipam) and
 three are file-backed (deploy, print, file). The draft treats all of it as one
 kind. Most of it is not authoritative: DHCP leases are re-learned, registry and
 proxy caches re-fill, monitoring history is disposable in this lab, deployment
