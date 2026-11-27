@@ -22,8 +22,8 @@ plan's step syntax, not its progress record. This table is the progress record.
 | 3 dns role, lock, health check | built | `run/evidence/packages.log`, `run/evidence/provision.log` |
 | 4 spec and renderer | built | `python3 -m unittest tests.test_render` |
 | 5 lab CLI and teardown | built | `run/evidence/lab.log` |
-| 6 s0-base boot | built | `run/evidence/s0-base.log` |
-| 7 s1-dns scenario | built, not yet booted | `tests/scenarios/s1-dns.sh` |
+| 6 s0-base boot | built | `run/evidence/s0-base.log`, predates the deployment contract |
+| 7 s1-dns scenario | built, not yet booted on this image id | `tests/scenarios/s1-dns.sh` |
 | 8 deployment contract | built | `run/evidence/deploy.log` |
 | 9 CI and supply chain | built | `run/evidence/ci.log` |
 | 10 isolation, budgets, runbooks | built | `run/evidence/isolation.log` |

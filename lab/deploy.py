@@ -49,11 +49,18 @@ def record_path(deployment_id: str) -> str:
 def await_record(
     address: str,
     deployment_id: str,
+    role: str,
+    digest: str | None = None,
     timeout: float = 900.0,
     interval: float = 5.0,
     command: list[str] | None = None,
 ) -> dict:
-    """Poll the guest until it has recorded this deployment, then return it."""
+    """Poll until the guest records this deployment, verified, and return it.
+
+    The check is part of the read, so no caller can hold an unverified record.
+    A record that exists but names another id, role or digest is a contract
+    breach, not something more waiting can fix, so it fails at once.
+    """
     ssh = command if command is not None else ssh_command()
     deadline = time.monotonic() + timeout
     last = "no attempt"
@@ -65,9 +72,17 @@ def await_record(
         )
         if done.returncode == 0 and done.stdout.strip():
             try:
-                return json.loads(done.stdout)
+                record = json.loads(done.stdout)
             except json.JSONDecodeError as exc:
                 last = f"record is not JSON: {exc}"
+            else:
+                try:
+                    verify_record(record, deployment_id, role, digest)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"deployment record at {address} is not this deployment: {exc}"
+                    ) from exc
+                return record
         else:
             last = (done.stderr or done.stdout).strip() or f"exit {done.returncode}"
         if time.monotonic() >= deadline:

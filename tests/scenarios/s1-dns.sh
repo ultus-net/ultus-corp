@@ -40,8 +40,8 @@ assert_ok "primary answers its own record" timeout 300 \
 # shipped copy is deleted at provisioning, so a local rewrite cannot fake this.
 assert_ok "secondary answers the copied zone" timeout 300 \
   bash -c "until dig +short +time=2 +tries=1 @$addr_b dns-a.lab.internal | grep -qx $addr_a; do sleep 2; done"
-assert_eq "secondary does not serve its own address" "" \
-  "$(dig +short +time=2 +tries=1 @$addr_b dns-a.lab.internal | grep -x "$addr_b" || true)"
+assert_ok "secondary does not answer the primary's name with its own address" \
+  bash -c "! dig +short +time=2 +tries=1 @$addr_b dns-a.lab.internal | grep -qx $addr_b"
 
 assert_ok "primary answers authoritatively" \
   bash -c "dig +norec +time=2 +tries=1 @$addr_a lab.internal SOA | grep -q 'flags:.* aa;'"

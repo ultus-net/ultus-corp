@@ -58,12 +58,12 @@ assert_ok "every lab range is disjoint from the host" python3 - <<'PY'
 import ipaddress, pathlib, sys
 
 lab = [
-    ipaddress.ip_network(line.strip(), strict=False)
+    ipaddress.ip_network(line.strip())
     for line in pathlib.Path("run/isolation/lab-cidrs.txt").read_text().splitlines()
     if line.strip()
 ]
 host = [
-    ipaddress.ip_network(line.strip(), strict=False)
+    ipaddress.ip_network(line.strip())
     for line in pathlib.Path("run/isolation/host-prefixes.txt").read_text().splitlines()
     if line.strip()
 ]
@@ -85,6 +85,12 @@ assert_ok "real role pin" check_role_froms_core Containerfile.dns
 assert_ok "real manifests" \
   check_manifest_one_per_line manifests/packages-common.txt manifests/packages-dns.txt
 assert_ok "real tree secrets" check_no_secret_patterns --tree .
+# The tree scan excludes the deliberate fixtures, so prove the path-scoped scan
+# still catches them. An exclusion that also anesthetised the check would hide
+# the exact leak the fixture exists to represent.
+assert_fails "the secret fixture is still caught" \
+  check_no_secret_patterns tests/fixtures/leak-key.txt
+assert_fails "the media fixture is still caught" check_no_install_media tests/fixtures
 assert_ok "no tracked secrets" check_no_tracked_secrets lab-secrets
 assert_ok "no installation media" check_no_install_media --tree .
 assert_ok "real role records" check_role_records docs/roles

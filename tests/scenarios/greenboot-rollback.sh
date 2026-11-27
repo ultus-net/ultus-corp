@@ -8,16 +8,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 . tests/lib.sh
-. build/common.sh
 
 lab up s1-dns
-addresses=$(python3 - <<'PY'
+node=$(python3 - <<'PY'
 import json, os
 state = json.load(open(os.environ["RUN"] + "/s1-dns/state.json"))
-print(state["nodes"]["dns-a"]["address"], state["nodes"]["dns-a"]["deployment_id"])
+node = state["nodes"]["dns-a"]
+print(node["address"], node["deployment_id"], node["volume"])
 PY
 )
-read -r addr id_a <<< "$addresses"
+read -r addr id_a volume <<< "$node"
 record=/var/lib/ultus-corp/deployments/$id_a.json
 
 guest() {
@@ -38,9 +38,10 @@ assert_ok "the good image matches its manifest" manifest_ok
 good_digest=$(guest 'bootc status --json --format-version=1' | digest_of)
 record_before=$(guest "sha256sum $record")
 
-# The failing layer is a patch on the good image, so a rollback returns to an
-# image whose only difference is the check that never belonged there.
-dns_id=$(podman image inspect --format '{{.Id}}' "$(lab_image dns)")
+# The failing layer is a patch on the exact image the disk was built from, not
+# on whatever the local tag points at now. A rollback then returns to an image
+# whose only difference is the check that never belonged there.
+dns_id=$(cat "$volume.id")
 cat > run/broken.Containerfile <<EOF
 FROM $dns_id
 COPY tests/fixtures/greenboot/99-broken.sh /usr/lib/greenboot/check/required.d/99-broken.sh
@@ -62,11 +63,25 @@ assert_ok "the guest rolls back after one failed boot" \
   guest 'sed -i "s/^GREENBOOT_MAX_BOOT_ATTEMPTS=.*/GREENBOOT_MAX_BOOT_ATTEMPTS=1/" /etc/greenboot/greenboot.conf && grep -qx "GREENBOOT_MAX_BOOT_ATTEMPTS=1" /etc/greenboot/greenboot.conf'
 assert_ok "the good host accepts the candidate" \
   guest 'bootc switch --transport containers-storage localhost/ultus-corp/broken:local'
-guest 'systemctl reboot' || true
+boot_before=$(guest 'cat /proc/sys/kernel/random/boot_id')
+# The SSH session drops before `systemctl reboot` can report, so its exit status
+# says nothing. The boot id is the proof that the host actually rebooted.
+guest 'systemctl reboot' >/dev/null 2>&1 || true
+
+deadline=$((SECONDS + 1500))
+rebooted=0
+while [ "$SECONDS" -lt "$deadline" ]; do
+  boot_now=$(guest 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true)
+  if [ -n "$boot_now" ] && [ "$boot_now" != "$boot_before" ]; then
+    rebooted=1
+    break
+  fi
+  sleep 5
+done
+assert_eq "the candidate rebooted" "1" "$rebooted"
 
 # The broken boot may be reachable for a moment; the marker proves the failing
 # check ran, and the good digest proves the host came back to the old image.
-deadline=$((SECONDS + 1500))
 rolled=0
 current=""
 while [ "$SECONDS" -lt "$deadline" ]; do

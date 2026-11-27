@@ -30,10 +30,11 @@ compares each one with the host's own plan.
 - the real tree passes the pins, manifest, secret, media and role-record checks,
   not only the fixtures
 
-`lab doctor --host-uplinks` prints the addresses and connected routes of
-physical interfaces plus the interface that carries the default route. It
-ignores the lab's own bridges, so the comparison cannot flag the lab against
-itself. A host with no uplink is a failure, not an empty pass.
+`lab doctor --host-uplinks` prints the host's networks, never the lab's own
+bridges: every physical interface, the interface carrying the default route,
+and the connected routes on those interfaces. An address is folded to its
+network, so the output is a canonical CIDR list the gate parses strictly. A
+host with no uplink is a failure, not an empty pass.
 
 ## Before publishing
 

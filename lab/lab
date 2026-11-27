@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import shutil
@@ -173,9 +174,8 @@ def wait_for_deployments(
         info = state["nodes"][node.name]
         _, digest = disk_provenance(Path(info["volume"]))
         record = deploy.await_record(
-            info["address"], info["deployment_id"], timeout=timeout
+            info["address"], info["deployment_id"], node.role, digest, timeout=timeout
         )
-        deploy.verify_record(record, info["deployment_id"], node.role, digest)
         # The harness keeps the history the guest deliberately does not.
         runstate.record_deployment(state, record)
         runstate.write(state_file, state)
@@ -485,18 +485,26 @@ def host_uplinks() -> list[str]:
             uplinks.add(name)
 
     prefixes: set[str] = set()
+
+    def add_network(value: str) -> None:
+        """An address carries its prefix; the caller compares networks."""
+        try:
+            prefixes.add(str(ipaddress.ip_network(value, strict=False)))
+        except ValueError as exc:
+            raise RuntimeError(f"cannot read the host prefix {value}: {exc}") from exc
+
     for link in links:
         if link.get("ifname") not in uplinks:
             continue
         for info in link.get("addr_info", []):
             if info.get("family") == "inet":
-                prefixes.add(f"{info['local']}/{info['prefixlen']}")
+                add_network(f"{info['local']}/{info['prefixlen']}")
     for route in routes:
         dst = route.get("dst")
         if not dst or dst == "default" or ":" in dst:
             continue
         if route.get("dev") in uplinks:
-            prefixes.add(dst)
+            add_network(dst)
     return sorted(prefixes)
 
 

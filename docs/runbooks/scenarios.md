@@ -65,6 +65,11 @@ A second boot must not rewrite a managed file. Gate 10 compares the manifest
 after readiness and after a reboot, and requires that a hand edit of
 `/etc/named.conf` fails the same comparison.
 
+The record is read over SSH with host-key checking disabled, because each run
+reuses an address and a remembered key would be stale rather than protective.
+That trust is scoped to an ephemeral guest on an isolated segment. Do not copy
+the option into a harness that reaches a persistent host.
+
 ## Greenboot rollback
 
 `50-dns-health.sh` is a required greenboot check. A failing required check keeps

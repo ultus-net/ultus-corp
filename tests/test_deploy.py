@@ -62,7 +62,7 @@ class TestAwaitRecord(unittest.TestCase):
     def test_polls_until_the_guest_records_the_deployment(self):
         with FakeSsh(after=3) as fake:
             record = await_record(
-                "10.100.10.11", DEPLOYMENT, timeout=10, interval=0.01
+                "10.100.10.11", DEPLOYMENT, "dns", DIGEST, timeout=10, interval=0.01
             )
             self.assertEqual(record["id"], DEPLOYMENT)
             self.assertEqual(fake.calls(), 3, "the harness stopped polling too early")
@@ -71,7 +71,12 @@ class TestAwaitRecord(unittest.TestCase):
         with FakeSsh(after=3) as fake:
             with mock.patch.dict(os.environ, {"FAKE_DEPLOY_GARBAGE": "1"}):
                 record = await_record(
-                    "10.100.10.11", DEPLOYMENT, timeout=10, interval=0.01
+                    "10.100.10.11",
+                    DEPLOYMENT,
+                    "dns",
+                    DIGEST,
+                    timeout=10,
+                    interval=0.01,
                 )
             self.assertEqual(record["id"], DEPLOYMENT)
             self.assertEqual(fake.calls(), 3, "a non-JSON body ended the wait")
@@ -79,9 +84,30 @@ class TestAwaitRecord(unittest.TestCase):
     def test_a_guest_that_never_records_fails_closed(self):
         with FakeSsh(after=99):
             with self.assertRaises(RuntimeError) as caught:
-                await_record("10.100.10.11", DEPLOYMENT, timeout=0.05, interval=0.01)
+                await_record(
+                    "10.100.10.11", DEPLOYMENT, "dns", DIGEST, timeout=0.05, interval=0.01
+                )
         self.assertIn("no deployment record", str(caught.exception))
         self.assertIn(DEPLOYMENT, str(caught.exception))
+
+    def test_a_record_for_another_role_is_refused_at_once(self):
+        with FakeSsh(after=1, role="hub") as fake:
+            with self.assertRaises(RuntimeError) as caught:
+                await_record(
+                    "10.100.10.11", DEPLOYMENT, "dns", DIGEST, timeout=10, interval=0.01
+                )
+        self.assertIn("expected dns", str(caught.exception))
+        self.assertEqual(fake.calls(), 1, "a contract breach was polled past")
+
+    def test_a_record_for_another_digest_is_refused_at_once(self):
+        other = "sha256:" + "2" * 64
+        with FakeSsh(after=1, digest=other) as fake:
+            with self.assertRaises(RuntimeError) as caught:
+                await_record(
+                    "10.100.10.11", DEPLOYMENT, "dns", DIGEST, timeout=10, interval=0.01
+                )
+        self.assertIn(other, str(caught.exception))
+        self.assertEqual(fake.calls(), 1, "a digest mismatch was polled past")
 
 
 class TestVerifyRecord(unittest.TestCase):

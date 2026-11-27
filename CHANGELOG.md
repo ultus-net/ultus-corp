@@ -41,3 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - feat: isolation gate (Task 10): every rendered network carries no `<forward>`, DHCP, bridge or libvirt DNS, every lab range is disjoint from the host's uplinks, and every scenario stays within its declared VM and RAM budget; a leaking fixture must fail the same check
 - feat: `lab doctor --host-uplinks` prints the host's physical address plan and ignores the lab's own bridges
 - docs: `docs/runbooks/scenarios.md` records the deployment contract, the greenboot proof and the P0 acceptance line; `docs/runbooks/isolation.md` records the publish checks
+- fix: the deployment read verifies the record it returns, so no caller can hold an unverified one; a record naming another role or digest fails at once instead of after the poll timeout
+- fix: the rollback proof reads the guest's boot id, so a reboot that never happened fails fast rather than being absorbed by the rollback timeout; the failing layer is built from the image id recorded beside the disk, not from whatever the local tag points at
+- fix: the isolation gate proves the path-scoped secret and media scans still catch the deliberate fixtures, and `lab doctor --host-uplinks` prints canonical networks that the gate parses strictly
+- fix: the `s1-dns` negative zone assertion is a direct negative check, not a `grep … || true` that passes on empty output
