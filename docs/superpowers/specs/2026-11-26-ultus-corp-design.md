@@ -250,7 +250,7 @@ library, so the renderer needs no dependency at all.
 | D22 | Branch footprint | One edge VM per branch. The branch profile runs the overlay plus a local BIND secondary, Unbound, Kea, chrony and a Caddy cache. Authority stays central; details reach the branch by zone transfer or at deploy. Unbound owns the client-facing `:53`, the BIND secondary binds a separate loopback address and port, and Unbound forwards the local zones to it | A branch needs local answers when the tunnel drops, and a second services VM buys nothing. Centralising the serving path would turn a WAN cut into an outage | A second services VM per branch; relaying DHCP and DNS to the hub |
 | D23 | Delivery | Build once and promote the exact qualified digest. The repository records a per-role release manifest; the rollout agent selects the digest with `bootc switch`. The deploy path never rebuilds | A rebuilt deploy is a different artifact from the qualified one, and a mutable tag cannot say what a host runs | Rebuilding at deploy; deploying a tag |
 | D24 | Pipelines | Two. A qualifies a candidate on upstream digest drift, and only the watcher is scheduled. B promotes and rolls out with a canary, waves, halts, parking and a maintenance window | Qualification and rollout fail differently, so they need separate triggers and rates. A daily upstream rebuild must not become a daily fleet reboot | One pipeline; scheduling the deploy |
-| D25 | Update semantics | `bootc upgrade` and `bootc switch` update `/usr` and three-way merge `/etc`; `/var` persists. Per-site seed values stay deploy-time, and gate 10 re-runs after an upgrade | An image-default `/etc` change can arrive with an upgrade, but a per-site value cannot be converged on a running host | Treating upgrade as `/usr` only; re-rendering `/etc` at runtime |
+| D25 | Update semantics | `bootc upgrade` and `bootc switch` update `/usr` and three-way merge `/etc`; `/var` persists. Per-site seed values stay deploy-time, and gate 15 checks the upgraded managed files against the candidate's expected manifest | An image-default `/etc` change can arrive with an upgrade, but a per-site value cannot be converged on a running host | Treating upgrade as `/usr` only; re-rendering `/etc` at runtime |
 | D26 | Recovery | Recovery follows the store class. Only stateless stores take automatic `bootc rollback`. Durable stores park, page and restore a backup into the matching image; rebuildable stores re-create and run the gate-14 probe | A blind rollback on a durable store leaves newer data on an older binary, the failure D20 exists to prevent | One generic rollback for every class |
 | D27 | Health and routing | The on-host probe has bounded timeouts, absence is failure, and each assertion is retryable or terminal. Failure order is recover, park, notify, and a threshold, timeout or recovery failure halts the waves | A green boot is not a working host, and silence is not success | Port-open checks; first-boot success |
 | D28 | Dead-man and evidence | Two switches: no successful qualification in N days, and a silent watcher for 24 hours. Retain per-release evidence and a notification payload with a local reproducer | Every other alert fires on failure; these fire on silence, and later triage needs the release fields | Alerting only on failure; guest-only evidence |
@@ -261,7 +261,9 @@ library, so the renderer needs no dependency at all.
 Configuration is a versioned artifact. The repository holds the templates, the
 value schema, the non-secret values and the tests. The image holds what every
 host of a role shares. The `lab` renderer turns `lab/lab.toml` into per-host
-configuration at deployment. Nothing converges host state after deployment.
+configuration at deployment. Nothing converges per-site configuration after
+deployment. A bootc image rollout (§Delivery and maintenance) is the one
+host-state change, and it does not touch per-site values.
 
 | Layer | Owns | Home | Changes on |
 | --- | --- | --- | --- |
@@ -310,9 +312,9 @@ Rules:
    history. When the host reaches ready, the `lab` CLI copies the record into
    its own state directory, keyed by deployment id, so rewrites happen at the
    harness level. `bootc status` is the only source for the running digest.
-7. After deployment ends, nothing converges configuration. Applications may
-   write their own state under `/var`. Runtime automation may change API objects
-   only.
+7. After deployment ends, nothing converges per-site configuration. Applications
+   may write their own state under `/var`. Runtime automation may change API
+   objects only, and a bootc image rollout follows §Delivery and maintenance.
 8. A drifted host is re-rendered from the repository or replaced, not repaired.
 
 ## Rollback and upgrade
@@ -398,16 +400,19 @@ cannot proceed safely.
 - Build once. A change produces one candidate image per affected role, pinned by
   base digest and the resolved NEVRA lock (gate 13). That candidate digest is the
   only artifact that can be promoted.
-- Promote the exact digest. A per-role release manifest in the repository records
-  the promoted digest. The rollout agent selects it with
-  `bootc switch <repo>@sha256:<digest>`. The deploy path never rebuilds.
+- Promote the exact digest. Promotion writes the qualified digest into the
+  per-role release manifest with an idempotent, reviewed commit. Rollout and a
+  fresh deployment consume that manifest, and the rollout agent selects the digest
+  with `bootc switch <repo>@sha256:<digest>`. The deploy path never rebuilds.
 - The repository is the source of desired state. The registry is the source of
   artifact identity. Tags are mutable, and GHCR has no documented tag-immutability
   control, so digest pinning is the enforcement.
 
 ### Pipeline A: qualify
 
-Triggered by upstream drift. The watcher is the only scheduled part.
+Triggered by upstream drift. A scheduled qualification heartbeat runs without
+drift so the dead-man's switch has a signal; it never deploys. The watcher is the
+only other scheduled part.
 
 1. The watcher compares the upstream base image digest with the digest recorded
    from the last build. It dedupes, so one upstream rebuild produces one change.
@@ -416,16 +421,17 @@ Triggered by upstream drift. The watcher is the only scheduled part.
 4. Blocking gates: `bootc container lint`, a vulnerability scan with an explicit
    severity threshold, SBOM generation, image signing, and provenance annotations
    for the source commit, base digest and lockfile hash.
-5. Qualification boots the produced disk image in a VM. It asserts zero failed
-   units, upgrades from the previously released digest, and runs the workload
-   smoke set. The upgrade step is gate 15.
+5. Qualification fresh-boots the candidate, then boots the previous release and
+   switches it to the candidate. Both legs assert zero failed units and the
+   workload smoke set; the upgrade leg is gate 15.
 6. Publish the qualified digest with its evidence. A failure produces a ticket or
    a change-request comment, not a page, because nothing reached a host.
 
 ### Pipeline B: promote and roll out
 
-1. Promotion copies the qualified digest to the release reference. It is
-   idempotent and rebuilds nothing.
+1. Promotion writes the qualified digest into the per-role release manifest with
+   an idempotent, reviewed commit, then copies the artifact to the release
+   reference. It rebuilds nothing.
 2. Canary: one host upgrades, reboots, and passes the health probe.
 3. Waves with a concurrency cap and a health gate between them.
 4. Halt on the failure threshold, a probe timeout, or a recovery failure. A halt
@@ -443,7 +449,8 @@ new image's default `/etc` is the base, the current-versus-previous diff is
 applied, and a locally modified file that differs from `/usr/etc` is retained.
 `/var` persists. An image-default change to `/etc` can therefore arrive with an
 upgrade, while a per-site seed value remains deploy-time and needs a new VM. Gate
-10 re-runs its managed-file manifest after every upgrade.
+15 compares the upgraded host's managed files against the candidate's expected
+manifest, not the previous release's baseline.
 
 ### Recovery per class
 
@@ -491,7 +498,9 @@ automatically.
 
 ### Dead-man's switches
 
-- Alert when no successful qualification run has completed in N days.
+- Alert when no successful qualification run has completed in N days. A scheduled
+  qualification heartbeat satisfies the switch during a healthy idle period, and
+  it never triggers a deploy.
 - Alert when the watcher has not reported in 24 hours.
 - Distinguish "no update available" from "registry unreachable". The lab's guests
   deny egress by default, so an unreachable registry is the normal guest state and
@@ -797,11 +806,11 @@ docs/                           design, plans, runbooks
     every durable backup on that host restores first, destroys the host's
     `/var`, re-runs deployment, and asserts the declared loss. A store with no
     probe fails the gate, and stores on other hosts are out of scope.
-15. Upgrade qualification: the produced disk boots with zero failed units, then
-    upgrades from the previously released digest. The gate re-runs the gate-10
-    managed-file manifest and the role's workload smoke set after the upgrade.
-    On a role's first release it passes on first boot, and the previous-release
-    leg is recorded as not applicable.
+15. Upgrade qualification: two legs. The candidate fresh-boots with zero failed
+    units and passes the workload smoke set. Then the previous release boots,
+    switches to the candidate, and passes the same checks with its managed files
+    compared against the candidate's expected manifest. On a role's first release
+    the previous-release leg is recorded as not applicable.
 
 ## Secrets and trust
 
@@ -895,7 +904,7 @@ the signature-policy flags remain to confirm (§Left to the builder).
 | Package gaps in Stream 10 | Roles do not resolve | EPEL 10 and vendor repositories, confirmed per role before s5 |
 | A libvirt network bridges to the home LAN | The lab leaks DHCP or DNS | The isolation gate fails the build |
 | A blind rollback hits a durable store | Newer data is read by an older binary | D26 routes durable failures to park and restore; only stateless stores take automatic rollback |
-| The `/etc` merge overwrites a deploy-rendered file | A per-site value changes under the host | Seed-rendered files are in the gate-10 manifest, which re-runs after every upgrade; a per-site change is a new seed |
+| The `/etc` merge overwrites a deploy-rendered file | A per-site value changes under the host | Seed-rendered files are in the candidate's expected manifest, which gate 15 checks after an upgrade; a per-site change is a new seed |
 | A parked digest is retried | A known-bad image returns | Parking is terminal for that digest; the next attempt needs a new build |
 | The watcher goes silent | The fleet stops updating with no signal | The dead-man's switch pages after 24 hours, and registry-unreachable is distinguished from no-update |
 | A tag is moved to a different digest | A host runs an unqualified image | Promotion records and selects the digest; tags are never trusted |
