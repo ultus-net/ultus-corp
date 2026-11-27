@@ -294,8 +294,10 @@ Rules:
    once per deployment id, not once per host. It writes that file with the id,
    the image digest, the role and the completion time, scrubs the cloud-init
    instance cache, and removes one-time secret material.
-   `/var/lib/ultus-corp/deployments/` is a log, not a claim about the running
-   image. `bootc status` is the only source for the running digest.
+   `/var/lib/ultus-corp/deployments/` holds the current VM's record, not a
+   history. When the host reaches ready, the `lab` CLI copies the record into
+   its own state directory, keyed by deployment id, so rewrites happen at the
+   harness level. `bootc status` is the only source for the running digest.
 7. After deployment ends, nothing converges configuration. Applications may
    write their own state under `/var`. Runtime automation may change API objects
    only.
@@ -340,6 +342,26 @@ never backed up.
 A redeployment is a new VM. It starts from the image and a fresh seed, and only
 durable stores are restored. Every rebuildable store is re-created, and its loss
 is the list declared for it.
+
+The `lab` state directory owns deployment history, not the guest. The guest keeps
+one record for the current id. A redeploy adds a new record at the harness, and
+the old one stays there. Deployment history is not a durable store, so it is
+never restored into a new VM.
+
+Each rebuildable store declares a probe and its expected state after a rebuild.
+Gate 14 runs the probe; a store with no probe fails the gate.
+
+| Store | Probe | Expected after rebuild |
+| --- | --- | --- |
+| dns | `dig` a static and a dynamic record | static answers from the seed; dynamic records re-register |
+| dhcp | a client acquires a lease | a new lease; old leases absent |
+| app / Keycloak | OIDC login to a realm declared in the repo | login succeeds; ad-hoc realms absent |
+| registry | pull a pinned image through the mirror | pull succeeds; the cache refills |
+| mon | query a metric and a log from before the rebuild | empty; collection resumes |
+| fleet | query the enrolled host | it re-enrols on the next check-in; old inventory absent |
+| deploy | PXE boot a client | artifacts re-sync; old TFTP state absent |
+| print | submit a job | it queues; the old spool is absent |
+| ipam | query an object declared in `lab.toml` | present; typed objects absent |
 
 s0 builds the DNS store from the seed on a fresh host. It proves the image
 rollback path, not a wipe of an existing store and not a durable restore.
@@ -577,12 +599,12 @@ docs/                           design, plans, runbooks
     files, against its expected post-install state. It asserts the manifest is
     unchanged after a second boot, and fails when a negative test hand-edits one
     managed file.
-11. Deployment: exactly one record exists per deployment id under
-    `/var/lib/ultus-corp/deployments/`, with the expected image digest and role.
-    The record is unchanged after a second boot, and the finalize unit does not
-    start again for that id. A redeploy with a new seed adds one record for the
-    new id and leaves the old one. The seed is ejected and deleted, and the
-    cached user-data is scrubbed.
+11. Deployment: the guest holds exactly one record for the current deployment id
+    under `/var/lib/ultus-corp/deployments/`, with the expected image digest and
+    role. It is unchanged after a second boot, and the finalize unit does not
+    start again for that id. The `lab` state holds one record per id, so a
+    redeploy adds one and leaves the old one. The seed is ejected and deleted,
+    and the cached user-data is scrubbed.
 12. Rollback: one store from each class in `§Rollback and upgrade` is exercised.
     A stateless store returns to the previous image, a config-only store to the
     previous image and seed, a rebuildable store is wiped and re-created, and a
@@ -590,12 +612,11 @@ docs/                           design, plans, runbooks
     not satisfied until every class has run.
 13. Reproducibility: the build consumes a lock of resolved NEVRA versions, and a
     package transaction outside the lock fails the build.
-14. Rebuild: on one selected host, each rebuildable store declares a recovery
-    source and a machine-checkable expected-loss inventory. The gate verifies
+14. Rebuild: on one selected host, each rebuildable store runs the probe in
+    `§Rollback and upgrade` and meets its expected state. The gate verifies
     every durable backup on that host restores first, destroys the host's
-    `/var`, re-runs deployment, and asserts each rebuildable store returns to
-    service with exactly its declared loss. Stores on other hosts are out of
-    scope for this gate.
+    `/var`, re-runs deployment, and asserts the declared loss. A store with no
+    probe fails the gate, and stores on other hosts are out of scope.
 
 ## Secrets and trust
 
@@ -665,6 +686,7 @@ Two consequences, both already reflected in the plan:
 | A durable store rolls back with the image | Older binaries read data written by the newer image | D20: durable stores are forward-only, with a quiesced backup and a restore into the matching image |
 | A durable store is misclassified as rebuildable | A rebuild wipes authoritative data, and the gate counts it as expected loss | The runbook names the store class, gate 14 checks the declared loss, and a disputed store takes the durable class until a test settles it |
 | The seed ISO carries secrets | A retained ISO exposes keys and an enrolment token | Mode 0600, never logged, ejected and deleted when deployment ends; cached user-data is scrubbed; the teardown gate asserts absence |
+| Deployment evidence lives only in the guest | A rebuild destroys the history a comparison needs | The `lab` CLI copies each record to its state directory when the host reaches ready; the guest keeps only the current one |
 | A bound image is absent on a cold boot | A Quadlet starts before its image is available | Preload the bound images during the disk build and test a cold boot with egress off |
 | Mutable Stream repositories | Two builds of the same image install different NEVRAs | A resolved NEVRA lock is consumed by the build; gate 13 |
 | libvirt tooling absent | s0 cannot start | Install libvirt, `virt-install` and a seed ISO tool, then prove one guest boots |

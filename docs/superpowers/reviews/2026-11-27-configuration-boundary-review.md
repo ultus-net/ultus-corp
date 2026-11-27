@@ -300,7 +300,7 @@ aspirational:
 | --- | --- |
 | Task 3, `Containerfile.dns` | Consume the resolved NEVRA lock instead of `packages.txt` |
 | Task 4, renderer | Render per-role configuration, and write a `deployment_id` into `meta-data` and the seed manifest |
-| Task 5, `lab` CLI | Eject and delete the seed when `ultus-deploy-ready` is reached, record it as consumed, and let teardown tolerate its absence |
+| Task 5, `lab` CLI | Eject and delete the seed when `ultus-deploy-ready` is reached, copy the deployment record into lab state, record the seed as consumed, and let teardown tolerate its absence |
 | Task 6, `s0-base` | Ship `ultus-deploy-finalize@.service` and `ultus-deploy-ready.target`; gate 11 reads the id-keyed records under `/var/lib/ultus-corp/deployments/` |
 | Task 7, `s1-dns` | Render `also-notify` and `allow-transfer` at deploy; move `lab.internal.zone` out of `/var` |
 | Task 8, CI | Wire gates 10 to 14, including the negative hand-edit test, the lock check and the rebuild scenario |
