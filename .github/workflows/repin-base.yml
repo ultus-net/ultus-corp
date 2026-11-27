@@ -31,7 +31,7 @@ jobs:
           git diff --exit-code manifests/base.txt && echo "CHANGED=false" >> "$GITHUB_ENV" \
             || echo "CHANGED=true" >> "$GITHUB_ENV"
       - if: env.CHANGED == 'true'
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           branch: chore/repin-base
           title: "chore: repin the bootc base"
