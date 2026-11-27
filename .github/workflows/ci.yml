@@ -1,0 +1,153 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io/ultus-net
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y xorriso
+      - run: bash tests/test-static.sh
+      - run: python3 -m unittest tests.test_render tests.test_deploy
+      - run: bash tests/test-lab.sh
+      - run: bash tests/test-ci.sh
+      - run: bash tests/test-isolation.sh
+
+  core:
+    needs: static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -c '. build/common.sh; build_core'
+      - run: echo "${{ github.token }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: |
+          set -euo pipefail
+          . build/common.sh
+          image="$REGISTRY/ultus-corp-core:${{ github.sha }}"
+          podman tag "$(core_image)" "$image"
+          podman push "$image"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-ref
+          path: manifests/core.txt
+
+  build:
+    needs: core
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        role: [dns]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-ref
+          path: manifests
+      - run: echo "${{ github.token }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: The core the roles build from is the core that was qualified
+        run: |
+          set -euo pipefail
+          image="$REGISTRY/ultus-corp-core:${{ github.sha }}"
+          podman pull "$image"
+          expected=$(cut -d@ -f2 manifests/core.txt)
+          actual="sha256:$(podman image inspect --format '{{.Id}}' "$image")"
+          test "$actual" = "$expected" || {
+            echo "pulled core $actual is not the recorded $expected" >&2
+            exit 1
+          }
+      - name: Build the role from the core digest
+        run: |
+          set -euo pipefail
+          . build/common.sh
+          role="${{ matrix.role }}"
+          manifest "$role"
+          podman build --build-arg CORE="$(core_digest)" -f "Containerfile.$role" -t "$(lab_image "$role")" .
+          podman run --rm "$(lab_image "$role")" bootc container lint
+          image="$REGISTRY/ultus-corp-$role:${{ github.sha }}"
+          podman tag "$(lab_image "$role")" "$image"
+          podman push "$image"
+      - run: bash tests/test-packages.sh
+      - run: bash tests/test-provision.sh
+
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m unittest tests.test_render -v
+
+  lab:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y xorriso
+      - run: bash tests/test-lab.sh
+
+  supply:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v3
+      # Trivy, syft and cosign all read the Docker config, so one login here
+      # covers the scan, the SBOM and the signature push.
+      - name: Authenticate to the registry
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.docker"
+          echo "${{ github.token }}" | podman login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin \
+            --authfile "$HOME/.docker/config.json"
+      - name: The scanned artifact is the signed artifact
+        run: |
+          set -euo pipefail
+          image="$REGISTRY/ultus-corp-dns:${{ github.sha }}"
+          # The pushed image is the one to sign, and its repository digest is
+          # only known after the pull. Reading it from the pull keeps the scan,
+          # the SBOM and the signature on the same bytes.
+          podman pull "$image"
+          digest=$(podman image inspect \
+            --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" \
+            | sed -n 's/.*@\(sha256:[0-9a-f]\{64\}\)$/\1/p' | head -n 1)
+          test -n "$digest" || { echo "no registry digest for $image" >&2; exit 1; }
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          echo "DIGEST=$digest" >> "$GITHUB_ENV"
+      # Actions track a moving ref on purpose. An action tag is tooling, not an
+      # artifact: a wrong exact tag breaks CI before any step runs, and adding
+      # one dependency should not need a version lookup. The base image digest
+      # and the package locks stay pinned because those are the artifact.
+      - uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ env.DIGEST }}
+          exit-code: "1"
+          severity: CRITICAL
+      - uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}@${{ env.DIGEST }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.spdx.json
+      - run: cosign sign --yes "$IMAGE@$DIGEST"

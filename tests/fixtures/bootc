@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# A stand-in for `bootc status`: the payload shape is the bootc host-v1 schema,
+# and tests/test-deploy.sh feeds it the fixture the record is parsed from.
+cat /fixtures/bootc-status.json

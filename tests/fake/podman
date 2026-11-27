@@ -25,10 +25,19 @@ case "${1:-}" in
     case "${2:-}" in
       exists) exit 0 ;;
       inspect)
-        if [ "${FAKE_PODMAN_STORE:-}" = rootful ]; then
+        fmt=
+        args=("$@")
+        for ((i = 0; i < ${#args[@]}; i++)); do
+          if [ "${args[i]}" = "--format" ]; then fmt=${args[i + 1]}; fi
+        done
+        value=$image_id
+        if [ "$fmt" = "{{.Digest}}" ]; then
+          value=${FAKE_IMAGE_DIGEST:-sha256:1111111111111111111111111111111111111111111111111111111111111111}
+        fi
+        if [ "${FAKE_PODMAN_STORE:-}" = rootful ] && [ "$fmt" != "{{.Digest}}" ]; then
           stored
         else
-          echo "$image_id"
+          echo "$value"
         fi ;;
       *) echo "fake podman: unsupported image $*" >&2; exit 1 ;;
     esac ;;

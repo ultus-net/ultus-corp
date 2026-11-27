@@ -4,9 +4,13 @@ cd "$(dirname "$0")/.."
 . tests/lib.sh
 role=${1:?usage: test-image.sh <role>}
 . build/common.sh
+. build/checks.sh
 
 assert_ok "image builds and lints" build_role "$role"
 assert_ok "core image exists" podman image exists "$(core_image)"
+# The producer's output must satisfy the same contract its fixture does, or CI
+# compares a prefixed id against a bare one and fails on the prefix.
+assert_ok "core ref is digest pinned" check_core_ref manifests/core.txt
 # A changed base pin or common manifest must rebuild the core, so the recorded
 # input hash is compared rather than trusted.
 assert_eq "core inputs recorded" "$(. build/common.sh; core_inputs)" \

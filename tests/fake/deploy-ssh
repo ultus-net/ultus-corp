@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Stand-in for ssh: reproduces the record the guest writes, after a delay.
+set -uo pipefail
+
+count_file=${FAKE_DEPLOY_COUNT:?}
+count=$(cat "$count_file" 2>/dev/null || echo 0)
+count=$((count + 1))
+echo "$count" > "$count_file"
+
+if [ "$count" -lt "${FAKE_DEPLOY_AFTER:-1}" ]; then
+  if [ -n "${FAKE_DEPLOY_GARBAGE:-}" ]; then
+    # A record that is present but unreadable must not end the wait.
+    echo "not a record yet"
+    exit 0
+  fi
+  echo "cat: /var/lib/ultus-corp/deployments: no such file" >&2
+  exit 1
+fi
+
+path=${3:-}
+id=${path##*/}
+id=${id%.json}
+printf '{"id":"%s","image_digest":"%s","role":"%s","completed_at":"2026-11-27T00:00:00Z"}\n' \
+  "$id" "${FAKE_DEPLOY_DIGEST:-sha256:1111111111111111111111111111111111111111111111111111111111111111}" \
+  "${FAKE_DEPLOY_ROLE:-dns}"

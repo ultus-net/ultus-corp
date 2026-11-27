@@ -132,34 +132,73 @@ check_manifest_one_per_line() {
 
 check_no_secret_patterns() {
     local status=0 path
+    # A scan of the tree must never read the secret store, the run directory or
+    # the object database. A tree scan also skips the deliberate leak fixtures
+    # and this file, which holds the patterns it searches for. A scan aimed at
+    # a path still sees everything, so the fixtures prove the check works.
+    local -a skip=(--exclude-dir=.git --exclude-dir=run --exclude-dir=lab-secrets
+      --exclude-dir=__pycache__)
+    if [ "${1:-}" = "--tree" ]; then
+        shift
+        skip+=(--exclude-dir=fixtures --exclude=checks.sh)
+    fi
     for path in "$@"; do
         [ -e "$path" ] || { echo "Path missing: $path"; status=1; continue; }
-        if grep -rIE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----' "$path" >/dev/null 2>&1; then
+        if grep -rIE "${skip[@]}" -- '-----BEGIN [A-Z ]*PRIVATE KEY-----' "$path" >/dev/null 2>&1; then
             echo "Private key material in $path"
             status=1
         fi
-        if grep -rIE -- 'AGE-SECRET-KEY-1' "$path" >/dev/null 2>&1; then
+        if grep -rIE "${skip[@]}" -- 'AGE-SECRET-KEY-1' "$path" >/dev/null 2>&1; then
             echo "Age secret key in $path"
             status=1
         fi
-        if grep -rIE -- '^[[:space:]]*PrivateKey[[:space:]]*=' "$path" >/dev/null 2>&1; then
+        if grep -rIE "${skip[@]}" -- '^[[:space:]]*PrivateKey[[:space:]]*=' "$path" >/dev/null 2>&1; then
             echo "WireGuard private key in $path"
-            status=1
-        fi
-        if grep -rIE -- 'lab-secrets/' "$path" >/dev/null 2>&1; then
-            echo "Reference to lab-secrets/ in $path"
             status=1
         fi
     done
     return $status
 }
 
+# A generated secret store is gitignored, and a tracked file under it is a
+# committed secret regardless of its contents.
+check_no_tracked_secrets() {
+    local path=${1:-lab-secrets} tracked
+    tracked=$(git ls-files -- "$path" 2>/dev/null)
+    if [ -n "$tracked" ]; then
+        echo "Tracked secret material under $path: $tracked"
+        return 1
+    fi
+}
+
+# The same rule the renderer must satisfy, run against a rendered network or a
+# fixture. A gate that accepts a forwarding, DHCP or bridged network is vacuous.
+check_network_isolated() {
+    local file=$1
+    [ -r "$file" ] || { echo "Network XML not readable: $file"; return 1; }
+    if grep -qE '<forward|<dhcp|<bridge name=' "$file"; then
+        echo "Network is not isolated: $file"
+        return 1
+    fi
+    grep -q "<dns enable='no'/>" "$file" || {
+        echo "Network does not disable libvirt DNS: $file"
+        return 1
+    }
+}
+
 check_no_install_media() {
     local status=0 path hit
+    local -a prune=(-not -path '*/run/*' -not -path '*/build/vm/*')
+    # The tree scan skips the one deliberate ISO fixture. A scan aimed at
+    # tests/fixtures directly still has to catch it.
+    if [ "${1:-}" = "--tree" ]; then
+        shift
+        prune+=(-not -path '*/tests/fixtures/*')
+    fi
     for path in "$@"; do
         [ -e "$path" ] || { echo "Path missing: $path"; status=1; continue; }
-        hit=$(find "$path" -type f \( -name '*.iso' -o -name '*.vhd' -o -name '*.qcow2' -o -name '*.wim' \) 2>/dev/null \
-              | grep -vE '(^|/)run/' | head -n 1)
+        hit=$(find "$path" -type f \( -name '*.iso' -o -name '*.vhd' -o -name '*.qcow2' -o -name '*.wim' \) \
+              "${prune[@]}" 2>/dev/null | head -n 1)
         if [ -n "$hit" ]; then
             echo "Install media in tree: $hit"
             status=1

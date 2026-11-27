@@ -1,0 +1,7 @@
+# The keyless identity that signed the pinned base image.
+#
+# Fill both fields from a signature an operator has verified on the upstream
+# image. Leave them empty until then: build/repin.sh refuses to trust an image
+# whose signer is unknown, so the weekly repin job fails closed and opens no PR.
+identity=
+issuer=

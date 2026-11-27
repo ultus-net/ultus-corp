@@ -35,3 +35,14 @@ if [ -n "$primary" ]; then
   named-checkconf -z "$conf"
 fi
 unbound-checkconf "$resolver"
+
+# The vendor units may have started at boot with the vendor's own configuration.
+# They are enabled for later boots, restarted onto the delivered configuration,
+# and the apply fails if either does not come up serving it. The image tests run
+# this script in a container with no init, so the handoff is skipped there.
+if [ -d /run/systemd/system ]; then
+  systemctl enable named.service unbound.service
+  systemctl restart named.service unbound.service
+  systemctl is-active --quiet named.service
+  systemctl is-active --quiet unbound.service
+fi

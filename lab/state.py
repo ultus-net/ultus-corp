@@ -21,6 +21,9 @@ def new(scenario: str) -> dict:
         "scenario": scenario,
         "owner": os.urandom(8).hex(),
         "nodes": {},
+        # One record per deployment id. A redeploy adds one and leaves the old
+        # one, so the harness keeps the history the guest deliberately does not.
+        "deployments": {},
         "resources": [],
     }
 
@@ -52,7 +55,7 @@ def read(path: Path) -> dict:
     return state
 
 
-def add(state: dict, kind: str, name: str, **extra: str) -> None:
+def add(state: dict, kind: str, name: str, **extra: object) -> None:
     state["resources"].append({"kind": kind, "name": name, **extra})
 
 
@@ -62,3 +65,8 @@ def drop(state: dict, kind: str, name: str) -> None:
         for item in state["resources"]
         if not (item["kind"] == kind and item["name"] == name)
     ]
+
+
+def record_deployment(state: dict, record: dict) -> None:
+    """Keep one record per deployment id: a redeploy adds, never overwrites."""
+    state.setdefault("deployments", {})[record["id"]] = record

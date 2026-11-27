@@ -1,0 +1,7 @@
+[Unit]
+Description=ultus-corp role first-boot install
+After=cloud-init.service
+
+# Every image ships this target, and it is deliberately empty. A role that needs
+# a first-boot install adds a unit with Before=ultus-role-install.target, so
+# ordering never depends on a unit that may not exist.

@@ -1,0 +1,35 @@
+{
+  "apiVersion": "org.containers.bootc/v1",
+  "kind": "BootcHost",
+  "metadata": {
+    "name": "host"
+  },
+  "spec": {
+    "bootOrder": "default",
+    "image": null
+  },
+  "status": {
+    "booted": {
+      "image": {
+        "image": {
+          "image": "localhost/ultus-corp/dns:local",
+          "transport": "containers-storage"
+        },
+        "imageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "version": "10",
+        "timestamp": "2026-11-27T00:00:00Z",
+        "architecture": "x86_64"
+      },
+      "cachedUpdate": null,
+      "incompatible": false,
+      "pinned": false,
+      "store": "ostree"
+    },
+    "staged": null,
+    "rollback": null,
+    "rollbackQueued": false,
+    "type": "bootcHost",
+    "readOnly": false,
+    "usrOverlay": null
+  }
+}

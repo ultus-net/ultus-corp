@@ -6,6 +6,9 @@ cd "$(dirname "$0")/.."
 export PATH="$PWD/lab:$PWD/tests/fake:$PATH"
 export FAKE_VIRSH_DIR="$PWD/run/fake-virsh"
 export LAB_DISK_BUILDER="$PWD/tests/fake/build-disk"
+# The fake virsh starts no guest, so there is no deployment to wait for. The
+# handshake itself is proved by tests/test_deploy.py against a fake ssh.
+export LAB_DEPLOY_WAIT=skip
 
 reset() {
   python3 - "$@" <<'PY'

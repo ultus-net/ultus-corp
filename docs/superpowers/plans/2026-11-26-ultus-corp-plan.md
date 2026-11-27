@@ -22,12 +22,19 @@ plan's step syntax, not its progress record. This table is the progress record.
 | 3 dns role, lock, health check | built | `run/evidence/packages.log`, `run/evidence/provision.log` |
 | 4 spec and renderer | built | `python3 -m unittest tests.test_render` |
 | 5 lab CLI and teardown | built | `run/evidence/lab.log` |
-| 6 s0-base boot | built | `run/evidence/s0-base.log` |
-| 7 s1-dns scenario | built, not yet booted | `tests/scenarios/s1-dns.sh` |
-| 8 deployment contract | next | - |
-| 9 CI and supply chain | planned | - |
-| 10 isolation, budgets, runbooks | planned | - |
-| 11 s1 evidence run | planned | - |
+| 6 s0-base boot | built | `run/evidence/s0-base.log`, predates the deployment contract |
+| 7 s1-dns scenario | built, not yet booted on this image id | `tests/scenarios/s1-dns.sh` |
+| 8 deployment contract | built | `run/evidence/deploy.log` |
+| 9 CI and supply chain | built | `run/evidence/ci.log` |
+| 10 isolation, budgets, runbooks | built | `run/evidence/isolation.log` |
+| 11 s1 evidence run | blocked on the rootful disk build | `tests/scenarios/s1-dns.sh` |
+| greenboot rollback | built, not yet booted | `run/evidence/greenboot.log`, `tests/scenarios/greenboot-rollback.sh` |
+
+PR [#7](https://github.com/ultus-net/ultus-corp/pull/7) carries Tasks 8-10 and
+the rollback proof. Task 11 stays open until the disk is rebuilt on this host:
+the cached disks predate the role image that carries the deployment contract,
+so `s0-base`, `s1-dns` and the rollback proof have no current hypervisor
+evidence.
 
 Three things changed after the design was merged, and the task text below
 reflects them: the core image split (Task 2), the lab-rendered DNS configuration

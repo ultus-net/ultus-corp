@@ -16,6 +16,7 @@ from lab.render import (
     unbound_conf_text,
     managed_files,
     managed_manifest,
+    new_deployment_id,
     node_identity,
     primary_of,
     secondaries_of,
@@ -335,6 +336,50 @@ class TestDnsRendering(unittest.TestCase):
         # deployment configures, and the identity is neither.
         spec, dns_a = self.primary()
         self.assertNotIn("/run/ultus-corp/node.json", managed_files(dns_a, spec))
+
+    def test_seed_carries_the_deployment_id(self):
+        spec, dns_a = self.primary()
+        deployment = new_deployment_id()
+        seed = seed_files(dns_a, spec, deployment_id=deployment)
+        self.assertIn(f"deployment_id: {deployment}", seed["meta-data"])
+        user = json.loads(seed["user-data"].split("\n", 1)[1])
+        idfile = next(
+            i
+            for i in user["write_files"]
+            if i["path"] == "/run/ultus-corp/deployment-id"
+        )
+        self.assertEqual(idfile["content"].strip(), deployment)
+        # One command, so a failed role install cannot reach the finalize
+        # enable. The target is started after the instance is enabled, so it
+        # pulls that instance in.
+        runcmd = user["runcmd"]
+        self.assertEqual(len(runcmd), 1, runcmd)
+        self.assertIn("systemctl start ultus-role-install.target", runcmd[0])
+        self.assertIn(
+            f"systemctl enable ultus-deploy-finalize@{deployment}.service", runcmd[0]
+        )
+        self.assertIn(
+            "systemctl --no-block start ultus-deploy-ready.target", runcmd[0]
+        )
+        self.assertLess(
+            runcmd[0].index("ultus-role-install.target"),
+            runcmd[0].index("ultus-deploy-finalize@"),
+        )
+
+    def test_deployment_id_is_a_lowercase_uuidv4(self):
+        import re
+
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        first, second = new_deployment_id(), new_deployment_id()
+        self.assertRegex(first, pattern)
+        self.assertNotEqual(first, second)
+
+    def test_a_bad_deployment_id_is_rejected(self):
+        spec, dns_a = self.primary()
+        for bad in ("not-a-uuid", "../../etc/passwd", "ABCDEF00-0000-4000-8000-000000000000"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    seed_files(dns_a, spec, deployment_id=bad)
 
     def test_unknown_dns_key_rejected(self):
         from pathlib import Path as P
