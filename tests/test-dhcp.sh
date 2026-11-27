@@ -49,8 +49,8 @@ assert_ok "no relay config shipped" \
   podman run --rm "$img" test ! -e /etc/ultus-corp/dhcp-relay.conf
 assert_ok "applier installed" \
   podman run --rm "$img" test -x /usr/libexec/ultus-corp/provision.sh
-assert_ok "provision unit enabled" \
-  podman run --rm "$img" systemctl is-enabled ultus-provision.service
+assert_eq "provision unit enabled" "enabled" \
+  "$(podman run --rm "$img" systemctl is-enabled ultus-provision.service)"
 assert_ok "the vendor kea unit is not enabled" \
   podman run --rm "$img" bash -c '! systemctl is-enabled kea-dhcp4.service'
 assert_ok "the vendor dnsmasq unit is not enabled" \

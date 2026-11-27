@@ -13,6 +13,10 @@ assert_ok "kea is absent" podman run --rm "$img" bash -c '! rpm -q kea'
 assert_ok "dnsmasq is absent" podman run --rm "$img" bash -c '! rpm -q dnsmasq'
 assert_ok "the client ships no applier" \
   podman run --rm "$img" test ! -e /usr/libexec/ultus-corp/provision.sh
+assert_ok "the client ships the shared provision unit" \
+  podman run --rm "$img" test -f /usr/lib/systemd/system/ultus-provision.service
+assert_ok "the client does not enable the shared provision unit" \
+  podman run --rm "$img" bash -c '! systemctl is-enabled ultus-provision.service'
 assert_ok "the client health check is required" \
   podman run --rm "$img" test -x /etc/greenboot/check/required.d/50-client-health.sh
 
