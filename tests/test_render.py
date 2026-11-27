@@ -507,6 +507,15 @@ class TestS2Spec(unittest.TestCase):
         self.assertEqual(subnet["pools"], [{"pool": "10.200.10.100 - 10.200.10.199"}])
         self.assertEqual(subnet["relay"]["ip-addresses"], ["10.200.10.254"])
 
+    def test_kea_config_loads_the_lease_cmds_hook(self):
+        spec = load("lab/lab.toml")
+        server = nodes_for(spec, "s2-dhcp")[0]
+        conf = json.loads(kea_conf_text(server, spec))["Dhcp4"]
+        self.assertEqual(
+            conf["hooks-libraries"],
+            [{"library": "/usr/lib64/kea/hooks/libdhcp_lease_cmds.so"}],
+        )
+
     def test_kea_config_sends_no_router_option(self):
         spec = load("lab/lab.toml")
         server = nodes_for(spec, "s2-dhcp")[0]

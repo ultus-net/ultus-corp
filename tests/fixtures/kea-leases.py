@@ -1,5 +1,6 @@
 import json
 import socket
+import sys
 
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.settimeout(5)
@@ -16,4 +17,9 @@ try:
         data += chunk
 except socket.timeout:
     pass
-print(json.dumps(json.loads(data)["arguments"]["leases"]))
+reply = json.loads(data)
+if reply.get("result") != 0 or "arguments" not in reply:
+    print(f"raw reply: {data.decode(errors='replace')}", file=sys.stderr)
+    print(f"kea text: {reply.get('text', '')}", file=sys.stderr)
+    sys.exit(1)
+print(json.dumps(reply["arguments"]["leases"]))

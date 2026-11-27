@@ -42,6 +42,8 @@ provision() {
 }
 
 assert_ok "kea installed"   podman run --rm "$img" rpm -q kea
+assert_ok "the lease_cmds hook ships" \
+  podman run --rm "$img" test -f /usr/lib64/kea/hooks/libdhcp_lease_cmds.so
 assert_ok "dnsmasq installed" podman run --rm "$img" rpm -q dnsmasq
 assert_ok "no kea config shipped" \
   podman run --rm "$img" test ! -e /etc/kea/kea-dhcp4.conf
@@ -71,7 +73,7 @@ assert_ok "relay config disables DNS" provision relay-a \
 
 # The config must start the daemon, not only parse. The container has no init,
 # so the applier skips the systemd handoff and the test starts Kea directly.
-assert_ok "rendered kea config starts and answers status-get" podman run --rm \
+assert_ok "rendered kea config starts, answers status-get and lists a lease" podman run --rm \
   -v "$PWD/run/fixtures/dhcp-a:/seed:ro" "$img" bash -c '
     set -euo pipefail
     cp -a /seed/. /
@@ -97,21 +99,43 @@ assert_ok "rendered kea config starts and answers status-get" podman run --rm \
     fi
     python3 - <<PY
 import json, socket, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(5)
-s.connect("/var/run/kea/kea4-ctrl-socket")
-s.sendall(json.dumps({"command": "status-get", "service": ["dhcp4"]}).encode() + b"\n")
-data = b""
-try:
-    while True:
-        chunk = s.recv(65536)
-        if not chunk:
-            break
-        data += chunk
-except socket.timeout:
-    pass
-reply = json.loads(data)
-sys.exit(0 if reply.get("result") == 0 and reply["arguments"]["sockets"]["status"] == "ready" else 1)
+
+# Kea closes the control-socket connection after one command, so every command
+# opens its own connection to the same socket.
+def send(command, arguments=None):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect("/var/run/kea/kea4-ctrl-socket")
+    message = {"command": command, "service": ["dhcp4"]}
+    if arguments is not None:
+        message["arguments"] = arguments
+    s.sendall(json.dumps(message).encode() + b"\n")
+    data = b""
+    try:
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    except socket.timeout:
+        pass
+    return json.loads(data)
+
+status = send("status-get")
+if status.get("result") != 0 or status["arguments"]["sockets"]["status"] != "ready":
+    print(status, file=sys.stderr)
+    sys.exit(1)
+# An empty lease database answers lease4-get-all with result 3, so add a lease
+# first. Without the lease_cmds hook every command here answers result 2.
+added = send("lease4-add", {"ip-address": "10.200.10.150",
+    "hw-address": "02:00:00:00:00:01", "subnet-id": 1})
+if added.get("result") != 0:
+    print(added, file=sys.stderr)
+    sys.exit(1)
+leases = send("lease4-get-all")
+if leases.get("result") != 0:
+    print(leases, file=sys.stderr)
+    sys.exit(1)
 PY
     kill "$pid"
     wait "$pid" || true

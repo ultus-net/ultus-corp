@@ -320,6 +320,10 @@ def kea_conf_text(node: Node, spec: Spec) -> str:
                     "socket-type": "unix",
                     "socket-name": "/var/run/kea/kea4-ctrl-socket",
                 },
+                # The control socket cannot list a lease without this hook.
+                "hooks-libraries": [
+                    {"library": "/usr/lib64/kea/hooks/libdhcp_lease_cmds.so"},
+                ],
                 "lease-database": {
                     "type": "memfile",
                     "name": "/var/lib/kea/kea-leases4.csv",

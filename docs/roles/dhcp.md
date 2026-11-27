@@ -9,7 +9,9 @@ selected by the node's `profile`.
 - The `server` profile runs `kea-dhcp4` from `/etc/kea/kea-dhcp4.conf`. The
   config declares the branch subnet and its pool, and names the relay's branch
   address so Kea accepts a request that arrives through it. The lease database
-  is Kea's memfile backend, a CSV file at `/var/lib/kea/kea-leases4.csv`.
+  is Kea's memfile backend, a CSV file at `/var/lib/kea/kea-leases4.csv`. The
+  image ships `kea-hooks` because the control socket cannot list a lease
+  without the `lease_cmds` hook.
 - The `relay` profile runs `dnsmasq` from `/etc/ultus-corp/dhcp-relay.conf`.
   The file sets `port=0`, so dnsmasq never answers DNS, and carries one
   `dhcp-relay=<relay address>,<server address>` line. The relay forwards and

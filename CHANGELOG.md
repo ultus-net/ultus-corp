@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+- fix: load Kea's lease_cmds hook so a live lease can be read over the control socket
 - feat: s2-dhcp proves a relayed lease across a Kea restart, a relay restart and a client reboot
 - feat: the client role proves a DHCP lease with no added package
 - feat: the dhcp role ships a Kea server and a dnsmasq relay
