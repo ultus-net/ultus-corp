@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+- fix: load Kea's lease_cmds hook so a live lease can be read over the control socket
+- feat: s2-dhcp proves a relayed lease across a Kea restart, a relay restart and a client reboot
+- feat: the client role proves a DHCP lease with no added package
+- feat: the dhcp role ships a Kea server and a dnsmasq relay
+- refactor: share the deployment gate and the provision unit across roles
+- feat: render a cross-site interface and a DHCP client mode
 - chore: merge the updated design from `main` and the delivery model from `docs/branch-footprint`, which `main` never received; the design now carries one sequence of decisions D1 to D33 and gates 1 to 16
 - feat: repository skeleton, evidence recorder and static gate ([Task 1](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md))
 - feat: pinned base, build argument and first role image ([Task 2](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md)); each gate now writes its own evidence file under `run/evidence/`

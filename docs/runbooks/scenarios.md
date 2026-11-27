@@ -17,6 +17,7 @@ VMs and 10 GiB.
 | --- | --- | --- | --- | --- |
 | `s0-base` | 1 | 1024 MiB | 1 VM, 2048 MiB | one image installs, boots, resolves its zone |
 | `s1-dns` | 2 | 2048 MiB | 2 VMs, 3072 MiB | primary and secondary zone transfer |
+| `s2-dhcp` | 3 | 3072 MiB | 3 VMs, 3072 MiB | relayed lease survives a restart |
 
 ## Rebuild rule and measurements
 
@@ -29,6 +30,7 @@ one-off disk build, which is why the disk is cached per image id.
 | --- | --- | --- | --- |
 | `s0-base` | unset | unset | pending the rebuild after the deployment-contract change |
 | `s1-dns` | unset | unset | pending the rebuild after the deployment-contract change |
+| `s2-dhcp` | unset | unset | pending the first hypervisor run |
 
 The measurement command is:
 
@@ -40,8 +42,8 @@ python3 lab/measure.py bash tests/scenarios/s1-dns.sh
 (the guest footprint), and the peak RSS of the harness's own children. GNU time
 is not required. The numbers stay unset until that run. An estimate is not
 evidence. The deployment-contract change replaced the role image, so the cached
-disks on this host predate it and the next run needs one rootful disk build
-first.
+disks on this host predate it and the next s2 run needs a rootful disk build for
+`dhcp` and one for `client`.
 
 ## Deployment contract
 
@@ -75,9 +77,12 @@ the option into a harness that reaches a persistent host.
 
 ## Greenboot rollback
 
-`50-dns-health.sh` is a required greenboot check. A failing required check keeps
-`boot-complete.target` from being reached, and greenboot rolls the host back to
-the previous deployment after `GREENBOOT_MAX_BOOT_ATTEMPTS`.
+`50-dns-health.sh`, `50-dhcp-health.sh` and `50-client-health.sh` are required
+greenboot checks. The dns check proves the zone answers, the dhcp check proves
+Kea's control socket is ready or the relay is active with `ip_forward` on, and
+the client check proves a lease on a declared DHCP interface. A failing required
+check keeps `boot-complete.target` from being reached, and greenboot rolls the
+host back to the previous deployment after `GREENBOOT_MAX_BOOT_ATTEMPTS`.
 
 The vendor unit is pulled into the `multi-user.target` transaction, and
 cloud-init's final stage is ordered after `multi-user.target`. Ordering the check
@@ -117,6 +122,8 @@ bash tests/test-image.sh dns &&
 bash tests/test-packages.sh &&
 bash tests/test-provision.sh &&
 bash tests/test-deploy.sh &&
+bash tests/test-dhcp.sh &&
+bash tests/test-client.sh &&
 bash tests/test-greenboot.sh &&
 python3 -m unittest tests.test_render tests.test_deploy &&
 bash tests/test-lab.sh &&
@@ -130,6 +137,7 @@ root:
 ```bash
 bash tests/scenarios/s0-base.sh
 bash tests/scenarios/s1-dns.sh
+bash tests/scenarios/s2-dhcp.sh
 bash tests/scenarios/greenboot-rollback.sh
 ```
 

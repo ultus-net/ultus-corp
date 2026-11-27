@@ -1,0 +1,15 @@
+[Unit]
+Description=Relay DHCP to the Kea server
+Documentation=file:/etc/ultus-corp/dhcp-relay.conf
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/libexec/ultus-corp/relay-prepare.sh
+ExecStart=/usr/sbin/dnsmasq --conf-file=/etc/ultus-corp/dhcp-relay.conf --keep-in-foreground --pid-file=
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

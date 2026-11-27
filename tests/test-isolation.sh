@@ -19,14 +19,10 @@ spec = render.load("lab/lab.toml")
 cidrs, budget = [], []
 for scenario in spec.scenarios:
     nodes = render.nodes_for(spec, scenario)
-    segments = {}
-    for node in nodes:
-        site = spec.sites[node.site]
-        for iface in node.interfaces:
-            segments[iface.segment] = site.segments[iface.segment]
+    segments = render.scenario_segments(spec, scenario)
     if not segments:
         raise SystemExit(f"{scenario} declares no segment")
-    for segment in segments.values():
+    for segment in segments:
         (out / f"{scenario}-{segment.name}.xml").write_text(
             render.network_xml(scenario, segment, spec), encoding="utf-8"
         )
@@ -81,9 +77,11 @@ PY
 # The real tree, not only fixtures. A gate that never reads the repository can
 # pass while the repository publishes something it should not.
 assert_ok "real core pin" check_base_pin manifests/base.txt Containerfile.core
-assert_ok "real role pin" check_role_froms_core Containerfile.dns
+assert_ok "real role pins" \
+  check_role_froms_core Containerfile.dns Containerfile.dhcp Containerfile.client
 assert_ok "real manifests" \
-  check_manifest_one_per_line manifests/packages-common.txt manifests/packages-dns.txt
+  check_manifest_one_per_line manifests/packages-common.txt \
+  manifests/packages-dns.txt manifests/packages-dhcp.txt
 assert_ok "real tree secrets" check_no_secret_patterns --tree .
 # The tree scan excludes the deliberate fixtures, so prove the path-scoped scan
 # still catches them. An exclusion that also anesthetised the check would hide

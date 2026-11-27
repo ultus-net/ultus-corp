@@ -1,0 +1,5 @@
+ARG CORE
+FROM ${CORE}
+
+COPY modules/client/ /
+RUN /usr/libexec/ultus-corp/build.d/50-client.sh

@@ -1,0 +1,33 @@
+[lab]
+realm = "LAB.INTERNAL"
+domain = "lab.internal"
+overlay = "10.255.0.0/16"
+
+[[site]]
+id = "dc"
+prefix = "10.100.0.0/16"
+
+  [[site.segment]]
+  name = "mgmt"
+  cidr = "10.100.10.0/24"
+
+[[scenario]]
+id = "s2-dhcp"
+title = "relayed DHCP with a surviving lease"
+vm_budget = 3
+ram_budget_mib = 3072
+
+[[node]]
+scenario = "s2-dhcp"
+name = "dhcp-a"
+site = "dc"
+role = "dhcp"
+vcpus = 1
+ram_mib = 1024
+disk_gib = 8
+
+  [[node.interface]]
+  segment = "mgmt"
+  address = "10.100.10.21"
+  gateway = "10.100.10.1"
+  nameservers = ["10.100.10.11"]
