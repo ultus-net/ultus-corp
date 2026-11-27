@@ -38,6 +38,30 @@ out=$(podman run --rm -e ULTUS_DEPLOY_TRIES=1 -e ULTUS_HEALTH_TRIES=1 "$img" bas
 assert_eq "the failure names the DHCP interface" "yes" \
   "$(grep -q 'no DHCP lease' <<<"$out" && echo yes || echo no)"
 
+# A lease inside the identity's CIDR must satisfy the check. The address goes on
+# lo, so the case needs no DHCP server and no second interface.
+assert_ok "a client holding a lease in the named CIDR passes" podman run --rm \
+  --cap-add=NET_ADMIN -e ULTUS_DEPLOY_TRIES=1 -e ULTUS_HEALTH_TRIES=1 "$img" bash -c '
+    mkdir -p /run/ultus-corp /var/lib/ultus-corp/deployments
+    printf "%s\n" "{\"name\":\"client-a\",\"role\":\"client\",\"profile\":null,\"dhcp_interfaces\":[{\"segment\":\"lan\",\"cidr\":\"10.200.10.0/24\"}]}" > /run/ultus-corp/node.json
+    : > /var/lib/ultus-corp/deployments/deployed.json
+    ip addr add 10.200.10.150/24 dev lo
+    exec /etc/greenboot/check/required.d/50-client-health.sh
+  '
+
+# A delivered identity that names no DHCP interface cannot be fixed by waiting,
+# so the check must fail at once and name the missing key.
+out=$(podman run --rm -e ULTUS_DEPLOY_TRIES=1 -e ULTUS_HEALTH_TRIES=120 "$img" bash -c '
+  mkdir -p /run/ultus-corp /var/lib/ultus-corp/deployments
+  printf "%s\n" "{\"name\":\"client-a\",\"role\":\"client\",\"profile\":null}" > /run/ultus-corp/node.json
+  : > /var/lib/ultus-corp/deployments/deployed.json
+  timeout 5 /etc/greenboot/check/required.d/50-client-health.sh
+  echo "status=$?"
+' 2>&1 || true)
+assert_eq "an identity without a DHCP interface fails at once" "yes" \
+  "$(grep -q 'the identity at /run/ultus-corp/node.json names no DHCP interface' <<<"$out" \
+    && grep -q 'status=1' <<<"$out" && echo yes || echo no)"
+
 run_role_proof() {
   local role=$1 proof
   proof=$(sed -n '/^```proof$/,/^```$/p' "docs/roles/$role.md" | sed '1d;$d')

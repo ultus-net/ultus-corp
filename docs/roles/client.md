@@ -21,9 +21,11 @@ got one. It adds no package to the core and applies no configuration of its own.
   not judged. On a deployed host it reads the CIDRs from `dhcp_interfaces` in
   `/run/ultus-corp/node.json`, compares them with `ip -4 -j addr show` through
   Python `ipaddress`, and requires at least one address on one of those
-  networks. It retries for `ULTUS_HEALTH_TRIES` seconds, 120 by default,
-  because the relay and Kea may still be deploying. A failing required check
-  keeps `boot-complete.target` unreached, so greenboot rolls the host back.
+  networks. An identity that names no DHCP interface fails at once, because
+  waiting cannot add the key. Otherwise it retries for `ULTUS_HEALTH_TRIES`
+  seconds, 120 by default, because the relay and Kea may still be deploying. A
+  failing required check keeps `boot-complete.target` unreached, so greenboot
+  rolls the host back.
 
 ## Windows concept
 
