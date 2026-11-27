@@ -1,0 +1,1 @@
+quay.io/centos-bootc/bootc-image-builder@sha256:851523884a476a8131415c07084bd73d8d7d9ed084e3d3faf210feda59b64332

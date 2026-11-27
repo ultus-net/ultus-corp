@@ -1,0 +1,10 @@
+cloud-init
+openssh-server
+qemu-guest-agent
+sudo
+podman
+nftables
+policycoreutils
+selinux-policy-targeted
+chrony
+greenboot

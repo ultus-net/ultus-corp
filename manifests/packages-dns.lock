@@ -1,0 +1,6 @@
+bind-32:9.18.33-31.el10.x86_64
+bind-dnssec-utils-32:9.18.33-31.el10.x86_64
+unbound-1.26.1-2.el10.x86_64
+unbound-anchor-1.26.1-2.el10.x86_64
+unbound-libs-1.26.1-2.el10.x86_64
+unbound-utils-1.26.1-2.el10.x86_64

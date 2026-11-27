@@ -1,0 +1,4 @@
+bind
+unbound
+openresolv
+systemd-resolved

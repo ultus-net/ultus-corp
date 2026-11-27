@@ -1,0 +1,14 @@
+[Unit]
+Description=Validate the ultus-corp dns configuration
+After=named.service
+Requires=named.service
+
+[Service]
+Type=oneshot
+# Syntax only. A secondary has no zone file until its transfer, so loading the
+# zones here would fail every secondary at boot. The required health check
+# proves the zone answers, from whichever node holds it.
+ExecStart=/usr/bin/named-checkconf /etc/named.conf
+
+[Install]
+WantedBy=multi-user.target

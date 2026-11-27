@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# A stand-in for podman that knows only what the disk build asks.
+set -uo pipefail
+
+image_id=${FAKE_IMAGE_ID:-fakeimageid00000000000000000000000000000000000000000000000000000}
+log() { [ -n "${FAKE_LOG:-}" ] && echo "$*" >> "$FAKE_LOG"; return 0; }
+
+# The build storage is modelled by one file holding the id of its tagged image.
+# It is absent on a first build, and stale when an older image was tagged there.
+stored() { cat "${FAKE_STORAGE_ID_FILE:?}" 2>/dev/null || echo none; }
+
+flag_value() {
+  local flag=$1
+  shift
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "$flag" ]; then echo "$2"; return 0; fi
+    shift
+  done
+  return 1
+}
+
+case "${1:-}" in
+  info) echo "${FAKE_PODMAN_ROOTLESS:-true}" ;;
+  image)
+    case "${2:-}" in
+      exists) exit 0 ;;
+      inspect)
+        if [ "${FAKE_PODMAN_STORE:-}" = rootful ]; then
+          stored
+        else
+          echo "$image_id"
+        fi ;;
+      *) echo "fake podman: unsupported image $*" >&2; exit 1 ;;
+    esac ;;
+  save)
+    log "save $*"
+    tar=$(flag_value -o "$@") || { echo "fake podman: save without -o" >&2; exit 1; }
+    printf '%s\n' "$image_id" > "$tar" ;;
+  load)
+    log "load $*"
+    tar=$(flag_value -i "$@") || { echo "fake podman: load without -i" >&2; exit 1; }
+    printf '%s\n' "${FAKE_LOAD_ID:-$(cat "$tar")}" > "${FAKE_STORAGE_ID_FILE:?}" ;;
+  run)
+    log "run $*"
+    out=
+    while [ $# -gt 0 ]; do
+      if [ "$1" = -v ]; then
+        case "$2" in *:/output) out=${2%%:/output} ;; esac
+        shift
+      fi
+      shift
+    done
+    [ -n "$out" ] || { echo "fake podman: no /output mount in $*" >&2; exit 1; }
+    mkdir -p "$out/qcow2"
+    # The builder emits a disk from whatever image its storage carries.
+    printf 'disk from %s\n' "$(stored)" > "$out/qcow2/disk.qcow2" ;;
+  *) echo "fake podman: unsupported command $*" >&2; exit 1 ;;
+esac

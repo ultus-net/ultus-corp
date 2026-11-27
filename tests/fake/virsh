@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# A stand-in for virsh that keeps domains and networks in flat files.
+set -uo pipefail
+
+dir=${FAKE_VIRSH_DIR:-run/fake-virsh}
+mkdir -p "$dir"
+for f in domains networks running nets-running; do
+  [ -f "$dir/$f" ] || : > "$dir/$f"
+done
+
+count=$(cat "$dir/count" 2>/dev/null || echo 0)
+count=$((count + 1))
+echo "$count" > "$dir/count"
+if [ -n "${VIRSH_FAIL_ON:-}" ] && [ "$count" -eq "$VIRSH_FAIL_ON" ]; then
+  echo "virsh: injected failure at call $count" >&2
+  exit 1
+fi
+
+cmd=${1:?virsh command required}
+shift
+
+name_of() {
+  sed -n 's:.*<name>\(.*\)</name>.*:\1:p' "$1" | head -n 1
+}
+
+remove_line() {
+  local file=$1 line=$2 tmp
+  tmp=$(mktemp)
+  grep -vx "$line" "$file" > "$tmp" || true
+  mv "$tmp" "$file"
+}
+
+case "$cmd" in
+  define) echo "$(name_of "$1")" >> "$dir/domains" ;;
+  start) echo "$1" >> "$dir/running" ;;
+  destroy) remove_line "$dir/running" "$1" ;;
+  undefine) remove_line "$dir/domains" "$1" ;;
+  list) cat "$dir/domains" ;;
+  domstate) grep -qx "$1" "$dir/running" && echo running || echo "shut off" ;;
+  net-define) echo "$(name_of "$1")" >> "$dir/networks" ;;
+  net-start) echo "$1" >> "$dir/nets-running" ;;
+  net-destroy) remove_line "$dir/nets-running" "$1" ;;
+  net-undefine) remove_line "$dir/networks" "$1" ;;
+  net-list) cat "$dir/networks" ;;
+  *) echo "fake virsh: unsupported command $cmd" >&2; exit 1 ;;
+esac

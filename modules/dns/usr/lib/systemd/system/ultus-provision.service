@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply the delivered ultus-corp configuration
+Wants=network-online.target
+After=cloud-init.service network-online.target
+Before=named.service unbound.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/ultus-corp/provision.sh
+
+[Install]
+WantedBy=multi-user.target

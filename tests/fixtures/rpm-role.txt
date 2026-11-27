@@ -1,0 +1,5 @@
+unbound-utils-1.20.0-1.el10.x86_64
+cloud-init-24.1-1.el10.noarch
+bind-9.18.0-1.el10.x86_64
+bind-libs-9.18.0-1.el10.x86_64
+unbound-libs-1.20.0-1.el10.x86_64
