@@ -10,6 +10,7 @@ under KVM, and answers a DNS query, with no manual step.
 | `bootc` installs the container image to the disk at build time | DISM applies a WIM to a partition | the image is an OCI container, so the same artifact is the build and the update |
 | `cloud-init` NoCloud seed from a `cidata` ISO | unattend.xml on installation media | the seed is a separate read-only disk, re-read on every boot |
 | `systemd` units order the boot | Service Control Manager | units declare dependencies, not a fixed start order |
+| `ultus-role-install.target` and `ultus-deploy-finalize@` close the deployment | first-boot scripts and a completion registry entry | the record is keyed by deployment id, and a second boot must not rewrite it |
 | `qemu-guest-agent` reports to the hypervisor | Hyper-V integration services | it is optional, and its channel is a virtio device |
 | libvirt isolated network | an internal Hyper-V virtual switch | there is no DHCP or DNS on the segment unless a guest provides it |
 
@@ -34,6 +35,26 @@ the primary and tears both nodes down.
 
 Both nodes need one cached disk, because they share the image. A rebuilt dns
 image costs one rootful `lab/build-disk.sh` run, as for any other role.
+
+## Deployment and the second boot
+
+Each seed carries a UUIDv4 `deployment_id`. `cloud-init` writes it to
+`/run/ultus-corp/deployment-id`, starts `ultus-role-install.target`, and enables
+`ultus-deploy-finalize@<id>.service` before it asks
+`ultus-deploy-ready.target` to start. The target pulls the enabled instance in,
+so the record lands after `cloud-final` and after the role install.
+
+`finalize.sh` writes `/var/lib/ultus-corp/deployments/<id>.json` with the id,
+the digest from `bootc status`, the role and the completion time, then scrubs
+the cloud-init instance cache. `lab up` reads that record over SSH, copies it
+into `run/<scenario>/state.json`, ejects the seed from both the live and the
+persistent domain, and deletes the ISO and the seed directory.
+
+The second boot must not rewrite a managed file. `tests/scenarios/s1-dns.sh`
+compares `run/s1-dns/render/<node>.managed-files.sha256` after readiness, after
+a reboot, and after a hand edit of `/etc/named.conf`, which must fail the same
+comparison. The deployment contract and the budgets are in
+[scenarios.md](scenarios.md).
 
 ## Host prerequisites
 

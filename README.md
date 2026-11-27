@@ -4,10 +4,18 @@ Public repository for a CentOS Stream 10 application lab built with `podman` and
 
 ## Status
 
-Development in progress. See [docs/runbooks/](docs/runbooks/) for details and status of individual components.
-
-[MIT License](LICENSE)
+The P0 harness and the `s0-base` boot are in place. The DNS scenario, the
+deployment contract, the greenboot rollback proof, CI with keyless signing, and
+the isolation gate are built and pass their local gates. `s1-dns` and the
+rollback proof still need a rootful disk build before their hypervisor evidence
+lands.
 
 ## Documentation
 
-The detailed specification, runbooks, and architectural decisions live in `docs/`. See the [design document](docs/superpowers/specs/2026-11-26-ultus-corp-design.md) and the [P0 plan](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md).
+- [Design](docs/superpowers/specs/2026-11-26-ultus-corp-design.md) and [P0 plan](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md)
+- [Scenarios and budgets](docs/runbooks/scenarios.md)
+- [Isolation](docs/runbooks/isolation.md)
+- [First boot](docs/runbooks/first-boot.md)
+- [Packages](docs/runbooks/packages.md)
+
+[MIT License](LICENSE)

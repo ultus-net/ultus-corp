@@ -17,16 +17,20 @@ exists.
 - The image ships no `named.conf`, no `unbound.conf` and no zone. The lab
   renderer writes all three from `lab/lab.toml` and the seed carries the final
   bytes, so no run's address is baked into a build.
-- `ultus-provision.service` applies them before `named` and `unbound` start. It
-  restores the SELinux labels cloud-init cannot set, deletes a zone file left by
-  an earlier deployment on a secondary, and fails closed if the seed delivered
-  no configuration.
+- `ultus-provision.service` is pulled in by `ultus-role-install.target`, which
+  `cloud-init` starts after the seed is written. It applies the files before the
+  vendor services start, restores the SELinux labels cloud-init cannot set,
+  deletes a zone file left by an earlier deployment on a secondary, and fails
+  closed if the seed delivered no configuration. It enables and restarts
+  `named` and `unbound` once the configuration validates.
 - `ultus-dns-ready.service` runs `named-checkconf` on the file, which checks
   syntax only. A secondary has no zone file until its transfer, so loading the
   zones at boot would fail every secondary.
 - `50-dns-health.sh` sits in `/etc/greenboot/check/required.d`, queries
   `127.0.0.1` for the zone's `SOA` and requires `status: NOERROR`. It retries for
   thirty seconds, because a secondary has no zone until its transfer completes.
+  A failing required check keeps `boot-complete.target` unreached, so greenboot
+  rolls the host back to the previous deployment.
 
 ## Windows concept
 

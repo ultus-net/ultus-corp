@@ -24,10 +24,11 @@ plan's step syntax, not its progress record. This table is the progress record.
 | 5 lab CLI and teardown | built | `run/evidence/lab.log` |
 | 6 s0-base boot | built | `run/evidence/s0-base.log` |
 | 7 s1-dns scenario | built, not yet booted | `tests/scenarios/s1-dns.sh` |
-| 8 deployment contract | next | - |
-| 9 CI and supply chain | planned | - |
-| 10 isolation, budgets, runbooks | planned | - |
-| 11 s1 evidence run | planned | - |
+| 8 deployment contract | built | `run/evidence/deploy.log` |
+| 9 CI and supply chain | built | `run/evidence/ci.log` |
+| 10 isolation, budgets, runbooks | built | `run/evidence/isolation.log` |
+| 11 s1 evidence run | blocked on the rootful disk build | `tests/scenarios/s1-dns.sh` |
+| greenboot rollback | built, not yet booted | `run/evidence/greenboot.log`, `tests/scenarios/greenboot-rollback.sh` |
 
 Three things changed after the design was merged, and the task text below
 reflects them: the core image split (Task 2), the lab-rendered DNS configuration
