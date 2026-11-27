@@ -23,9 +23,9 @@ they are applied once and never converge afterwards.
 
 Three findings are correctness issues. Deployment values have no contract, and
 the plan already mixes a build-time script with a deployment value. Atomic
-rollback covers `/usr`, while 12 of the 17 roles keep state in `/var` (13 after
-the change below). Quadlet roles sit in a second artifact plane that the image
-does not own.
+rollback covers `/usr`, while 12 of the 17 roles keep data in `/var`, and the
+draft treats all of it as durable. Quadlet roles sit in a second artifact plane
+that the image does not own.
 
 ## 1. The model, stated precisely
 
@@ -87,36 +87,44 @@ runtime, which is the thing the model forbids. The seed also carries keys and an
 enrolment token with no stated permissions, deletion or log rule.
 
 Change: the `lab` renderer writes per-role configuration into the seed, and the
-guest copies it into place. The seed carries identity, rendered configuration and
-first-boot secret material only. It is mode 0600, never logged, and ejected and
-deleted when deployment ends; teardown tolerates its absence, so a later `up` and
-`down` still work. A finalize unit writes one deployment record, scrubs the
-cached user-data, and marks the host ready; `cloud-init` retains the raw input
-under `/var/lib/cloud/instance/` until that runs. Build-time scripts enable
-units; they never consume a deployment value.
+guest copies it into place. The seed carries identity, rendered configuration,
+a `deployment_id`, and first-boot secret material only. It is mode 0600, never
+logged, and ejected and deleted when deployment ends; teardown tolerates its
+absence, so a later `up` and `down` still work. A finalize template runs once per
+deployment id, writes one record, scrubs the cached user-data, and marks the host
+ready; `cloud-init` retains the raw input under `/var/lib/cloud/instance/` until
+that runs. Build-time scripts enable units; they never consume a deployment
+value.
 
 ### F2. Atomic rollback is not a data rollback (P1)
 
 The draft promises "atomic upgrade and rollback" in D1 (`:224`) and proves it in
-s0 (`:149`), which boots the DNS primary. That role is application state under
-the profile table, so s0 proves the image path only.
+s0 (`:149`), which boots the DNS primary. Under the store table below the zone is
+rebuildable, so s0 proves the image path and a fresh build, not a wipe and not a
+durable restore.
 
-Twelve of the 17 roles in the roles table are stateful (`:326-344`): nine carry
-application state (dhcp, pki, ipa, app, registry, mon, secrets, mdm, ipam) and
-three are file-backed (deploy, print, file). The spec change below moves the DNS
-primary into application state as well, taking the count to 13. bootc reverts
-`/usr`; `/var` persists across deployments, and the bootc filesystem
-documentation says a rollback "should not affect this application data".
+Twelve of the 17 roles in the roles table keep data (`:326-344`): nine carry
+application data (dhcp, pki, ipa, app, registry, mon, secrets, mdm, ipam) and
+three are file-backed (deploy, print, file). The draft treats all of it as one
+kind. Most of it is not authoritative: DHCP leases are re-learned, registry and
+proxy caches re-fill, monitoring history is disposable in this lab, deployment
+artifacts re-sync, and print spool is re-queued. Backing those up protects
+nothing and adds a restore burden to every scenario. bootc reverts `/usr`; `/var`
+persists across deployments, and the bootc filesystem documentation says a
+rollback "should not affect this application data".
 
-Schema downgrade is not a safe assumption: NetBox migrations are not guaranteed
+The smaller durable set is what needs care: CA keys and issued material, the
+FreeIPA directory, OpenBao storage, Samba shares, and Gitea repositories. A schema
+downgrade is not a safe assumption there: NetBox migrations are not guaranteed
 reversible, and Keycloak reports that a downgraded server cannot use an upgraded
 schema. A filesystem snapshot is also not an application-consistent backup, and
 the draft does not say in what order a restore runs or which image it restores
 into.
 
-Change: a rollback class per role, a recorded procedure, and one exercised role
-per class. Stateful roles quiesce, back up with the application's own tool, and
-restore into the matching image. They never roll back by image alone.
+Change: a class per data store, not per role. Durable stores quiesce, back up
+with the application's own tool, and restore into the matching image. Rebuildable
+stores are wiped and re-created from the repository, a peer or upstream, and the
+accepted loss is declared and tested. A role can hold both, and `app` does.
 
 ### F3. Quadlet roles are a second artifact plane (P1)
 
@@ -265,15 +273,16 @@ FreeIPA, Kea or Fleet, so it would be a third tool for partial coverage.
 
 The spec commit accepts the findings into the draft:
 
-- D20: a per-role rollback contract, with a profile-level class table.
+- D20: a per-store rollback contract, with a store-level class table.
 - D21: Quadlets as bootc logically bound images, pinned by digest, read through
   the additional image store, and preloaded so a cold boot with egress off works.
 - `§Configuration and deployment inputs`: the four-layer model, the seed
   contract, the secrecy lifecycle, the deployment record, and when deployment
   ends.
-- Gates 10 to 13: managed-file integrity, the deployment record, rollback by
-  class, and build reproducibility.
-- Risk rows for stateful rollback, the seed ISO, a missing bound image on a cold
+- Gates 10 to 14: managed-file integrity, the deployment record, rollback by
+  class, build reproducibility, and a destructive rebuild.
+- Risk rows for a durable store rolling back with the image, a durable store
+  misclassified as rebuildable, the seed ISO, a missing bound image on a cold
   boot, and mutable Stream repositories.
 - The missing server install medium in `§Not proven here`.
 
@@ -292,13 +301,14 @@ aspirational:
 | Task 5, `lab` CLI | Eject and delete the seed when `ultus-deploy-ready` is reached, record it as consumed, and let teardown tolerate its absence |
 | Task 6, `s0-base` | Ship `ultus-deploy-finalize.service` and `ultus-deploy-ready.target`; gate 11 reads `deployment.json` |
 | Task 7, `s1-dns` | Render `also-notify` and `allow-transfer` at deploy; move `lab.internal.zone` out of `/var` |
-| Task 8, CI | Wire gates 10 to 13, including the negative hand-edit test and the lock check |
+| Task 8, CI | Wire gates 10 to 14, including the negative hand-edit test, the lock check and the rebuild scenario |
 | First Quadlet role, s5 `app` | Preload the bound images and add the cold boot with egress off |
 
-P0 proves s0, which boots the DNS primary. The s0 scenario asserts lookup and
-delegation, not restore, so it does not satisfy gate 12. The first plan that adds
-application state must add one upgrade and restore, or F2 stays untested. Gate 12
-stays open until one role from each class has run.
+P0 proves s0, which builds the DNS store from the seed on a fresh host. That is a
+rebuildable store, and s0 does not wipe an existing one. Gate 12 stays open until
+a stateless, config-only, rebuildable and durable store has each run. Gate 14
+needs a destructive rebuild, so it belongs to the first plan that holds a store
+worth wiping.
 
 ## 7. What would change this recommendation
 

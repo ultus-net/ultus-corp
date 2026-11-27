@@ -240,7 +240,7 @@ library, so the renderer needs no dependency at all.
 | D17 | Endpoint management | Fleet for inventory and policy, PXE for Linux and WinPE, macOS by profile | One plane for a mixed fleet, and onboarding from blank | Intune, which needs Entra; client VMs only, which leaves onboarding manual |
 | D18 | 802.1X authenticator | `hostapd` with the wired driver on the users bridge | Gives real supplicants a real authenticator, not just `eapol_test` | `eapol_test` only, which proves the server and nothing else |
 | D19 | Integration evidence | A static interface-composition check plus a dated assembly run | Composition is checked continuously where it can be, and sampled where it cannot | Assuming a green scenario proves the network |
-| D20 | Rollback contract | A per-role restore procedure, recorded in the role's runbook. Stateless roles redeploy the previous image; config-only roles redeploy the previous image and seed; stateful roles are forward-only with a quiesced, application-consistent backup and a restore into a matching image. Gate 12 exercises one role per class, and each remaining role's first restore is dated runbook evidence | `/var` persists across deployments, and database schemas are not reliably reversible. A filesystem snapshot is not an application-consistent backup, and older binaries against newer data is an outage, not a rollback | Treating `bootc rollback` as a data rollback; one generic snapshot rule for every role |
+| D20 | Rollback contract | The class belongs to each data store, not the role. Stateless roles redeploy the previous image; config-only roles redeploy the previous image and seed; durable stores are quiesced, backed up with the application's tool and restored into a matching image; rebuildable stores are wiped and re-created from the repository, a peer or upstream, with the accepted loss declared. A role can hold both, and `app` does. Gate 12 exercises one store per class, and gate 14 tests the declared loss | `/var` persists across deployments, and database schemas are not reliably reversible. Not all `/var` data is authoritative: DHCP leases, registry and proxy caches, monitoring history and deployment artifacts are rebuildable. Treating them as durable adds a backup burden that protects nothing | Treating `bootc rollback` as a data rollback; one generic snapshot rule for every role; backing up data that is cheaper to recreate |
 | D21 | Update plane | Quadlet containers are declared as bootc logically bound images under `/usr/lib/bootc/bound-images.d`, pinned by digest, preloaded by the disk build, and read through `GlobalArgs=--storage-opt=additionalimagestore=/usr/lib/bootc/storage`. No unit sets `AutoUpdate=registry`, and the auto-update timer is masked. Changing an application means building a new host image | A floating container in `/var/lib/containers` is outside the image digest, rollback, offline boot and SBOM. Without the storage argument the unit still uses floating storage; without preloading, a cold boot with no egress has no image | Independent container auto-update; digest pinning that still allows in-place application updates |
 
 ## Configuration and deployment inputs
@@ -275,17 +275,24 @@ Rules:
    are absent from the cloud-init cache and the logs, and that the seed file is
    gone.
 5. A role that needs a first-boot install ships an idempotent, fail-closed
-   oneshot unit. That install may write `/etc` and `/var`, enable units, and
-   render the vendor's own configuration from the supplied inputs. It never runs
-   a `lab` template. Deployment ends when `cloud-init` and the role's installer
-   both report success; before that the host is not in service.
-6. Every role image ships `ultus-deploy-finalize.service`, ordered after
-   `cloud-final.service` and the role's installer. It is guarded by
-   `ConditionPathExists=!/var/lib/ultus-corp/deployment.json` and writes that
-   file once, with the deployment id, the image digest, the role and the
-   completion time. It also scrubs the cloud-init instance cache and removes
-   one-time secret material. `ultus-deploy-ready.target` is reached when the
-   file exists.
+   oneshot unit, ordered before `ultus-role-install.target`. Every image ships
+   that target. For a role with no installer it is an empty target, so ordering
+   never depends on a unit that may not exist. The install may write `/etc` and
+   `/var`, enable units, and render the vendor's own configuration from the
+   supplied inputs. It never runs a `lab` template. Deployment ends when
+   `cloud-init` and `ultus-role-install.target` both report success; before that
+   the host is not in service.
+6. The seed carries a `deployment_id` in `meta-data`. `cloud-init` writes it to
+   `/run/ultus-corp/deployment-id` and enables
+   `ultus-deploy-finalize@<id>.service`. That template is ordered after
+   `cloud-final.service` and `ultus-role-install.target`, and before
+   `ultus-deploy-ready.target`, which pulls it in. Its condition is
+   `ConditionPathExists=!/var/lib/ultus-corp/deployments/%i.json`, so it runs
+   once per deployment id, not once per host. It writes that file with the id,
+   the image digest, the role and the completion time, scrubs the cloud-init
+   instance cache, and removes one-time secret material.
+   `/var/lib/ultus-corp/deployments/` is a log, not a claim about the running
+   image. `bootc status` is the only source for the running digest.
 7. After deployment ends, nothing converges configuration. Applications may
    write their own state under `/var`. Runtime automation may change API objects
    only.
@@ -293,23 +300,47 @@ Rules:
 
 ## Rollback and upgrade
 
-A stateful role never rolls back by image alone. Its runbook names the quiesce
-step, the backup method, the restore order and the image it restores into.
+A role never rolls back by image alone when it holds data that cannot be
+recreated. The class belongs to the data store, not the role, because one role
+can hold a durable store and a rebuildable one.
 
-The classes partition the 17 roles by profile. `dns` is the one role split across
-two classes, because the primary holds zone data and the secondary re-transfers
-from it.
-
-| Class | Roles | Rollback |
+| Class | Meaning | Rollback |
 | --- | --- | --- |
-| Stateless | ntp, proxy | `bootc rollback` to the previous image |
-| Config-only | dns (secondary), edge, radius | previous image plus the previous seed |
-| Application state | dns (primary), dhcp, pki, ipa, app, registry, mon, secrets, mdm, ipam | quiesce writes, back up with the application's tool, restore into the matching image |
-| File-backed | deploy, print, file | quiesce, back up the share, restore into the matching image |
+| Stateless | no local data | `bootc rollback` to the previous image |
+| Config-only | the seed is the only input, and there is no local store | previous image plus the previous seed |
+| Rebuildable | data is re-created from the repository, a peer or upstream, and the accepted loss is declared | previous image plus the previous seed; wipe the store and re-create it |
+| Durable | data cannot be re-created | quiesce writes, back up with the application's tool, restore into the matching image |
 
-s0 exercises the image rollback path on the DNS primary before that host holds
-runtime zone data. It does not prove the application-state restore, even though
-the DNS primary belongs to that class.
+| Role | Class | Store, and how it comes back |
+| --- | --- | --- |
+| ntp, proxy | stateless | none |
+| edge, radius | config-only | none; every input is in the seed |
+| dns | rebuildable | the zone is rendered from `lab.toml`, where static records live; Kea and FreeIPA re-register dynamic records |
+| dhcp | rebuildable | the lease store; clients re-DISCOVER |
+| app | both | Keycloak realms rebuild from the repo; Gitea repositories are durable |
+| registry | rebuildable | pull-through cache; it re-pulls |
+| mon | rebuildable | metrics and logs; history is lost, and that loss is declared |
+| mdm | rebuildable | Fleet enrolment re-establishes; policies are in the repo |
+| deploy | rebuildable | artifacts re-sync from upstream |
+| print | rebuildable | the spool is re-queued; printer configuration is rendered |
+| ipam | rebuildable | NetBox content is declared in `lab.toml`; ad-hoc objects are not durable |
+| pki | durable | CA keys and issued material |
+| ipa | durable | directory and Kerberos keys |
+| secrets | durable | OpenBao storage and unseal material |
+| file | durable | Samba share contents |
+
+For a rebuildable store the repository, a peer or upstream is the source of
+truth. An API object that matters is promoted into the repository, or it is not
+durable. A durable store is never silently recreated, and a rebuildable store is
+never backed up.
+
+s0 builds the DNS store from the seed on a fresh host. It proves the image
+rollback path, not a wipe of an existing store and not a durable restore.
+
+A bootc-only rollback starts no new seed and runs no finalize. The deployment log
+keeps the last completed id, and `bootc status` reports the rolled-back digest.
+A redeploy with a new seed is a new id and adds a record. The two cases are never
+conflated.
 
 ## Target architecture
 
@@ -538,16 +569,22 @@ docs/                           design, plans, runbooks
     files, against its expected post-install state. It asserts the manifest is
     unchanged after a second boot, and fails when a negative test hand-edits one
     managed file.
-11. Deployment: `/var/lib/ultus-corp/deployment.json` exists after two boots,
-    records one deployment id with the expected image digest and role, and the
-    finalize unit's journal shows one start. The seed is ejected and deleted,
-    and the cached user-data is scrubbed.
-12. Rollback: one role from each class in `§Rollback and upgrade` is exercised.
-    A stateless role returns to the previous image, a config-only role to the
-    previous image and seed, and a stateful role restores its backup into the
-    matching image. The gate is not satisfied until every class has run.
+11. Deployment: exactly one record exists per deployment id under
+    `/var/lib/ultus-corp/deployments/`, with the expected image digest and role.
+    The record is unchanged after a second boot, and the finalize unit does not
+    start again for that id. A redeploy with a new seed adds one record for the
+    new id and leaves the old one. The seed is ejected and deleted, and the
+    cached user-data is scrubbed.
+12. Rollback: one store from each class in `§Rollback and upgrade` is exercised.
+    A stateless store returns to the previous image, a config-only store to the
+    previous image and seed, a rebuildable store is wiped and re-created, and a
+    durable store restores from its backup into the matching image. The gate is
+    not satisfied until every class has run.
 13. Reproducibility: the build consumes a lock of resolved NEVRA versions, and a
     package transaction outside the lock fails the build.
+14. Rebuild: a scenario destroys `/var` on one host and re-runs deployment. Every
+    rebuildable store returns to service, and the loss matches the declared list.
+    A durable store comes back only from its backup.
 
 ## Secrets and trust
 
@@ -614,7 +651,8 @@ Two consequences, both already reflected in the plan:
 | Integration evidence is sampled | A cross-component breakage survives a green scenario | The interface-composition gate plus a dated assembly run |
 | The third branch never runs | A three-branch interaction is never observed | `assembly-branches` proves two branches plus the hub, and the third stays spec-tested and documented |
 | Teardown leaks state | A stale network or volume breaks the next scenario | The teardown gate, which re-runs `up` after `down` |
-| Stateful rollback runs older binaries | A rollback boots a previous image against data written by the newer one | D20: the 13 stateful roles are forward-only, with a quiesced backup and a restore into the matching image |
+| A durable store rolls back with the image | Older binaries read data written by the newer image | D20: durable stores are forward-only, with a quiesced backup and a restore into the matching image |
+| A durable store is misclassified as rebuildable | A rebuild wipes authoritative data, and the gate counts it as expected loss | The runbook names the store class, gate 14 checks the declared loss, and a disputed store takes the durable class until a test settles it |
 | The seed ISO carries secrets | A retained ISO exposes keys and an enrolment token | Mode 0600, never logged, ejected and deleted when deployment ends; cached user-data is scrubbed; the teardown gate asserts absence |
 | A bound image is absent on a cold boot | A Quadlet starts before its image is available | Preload the bound images during the disk build and test a cold boot with egress off |
 | Mutable Stream repositories | Two builds of the same image install different NEVRAs | A resolved NEVRA lock is consumed by the build; gate 13 |
