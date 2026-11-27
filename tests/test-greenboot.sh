@@ -12,6 +12,11 @@ assert_ok "bootc can roll back" \
   podman run --rm "$img" bootc rollback --help
 assert_ok "the dns health check is a required check" \
   podman run --rm "$img" test -x /etc/greenboot/check/required.d/50-dns-health.sh
+assert_ok "the shared deployment gate ships" \
+  podman run --rm "$img" test -f /usr/libexec/ultus-corp/deployed.sh
+assert_ok "the dns check sources the shared gate" \
+  podman run --rm "$img" grep -q 'ultus-corp/deployed.sh' \
+  /etc/greenboot/check/required.d/50-dns-health.sh
 # The vendor unit is pulled by multi-user, and cloud-final is ordered after
 # multi-user. Ordering the check after cloud-final builds a cycle that deletes
 # the check, so a green boot would pass unproven.

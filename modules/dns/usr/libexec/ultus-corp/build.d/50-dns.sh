@@ -5,7 +5,8 @@ test -x /usr/libexec/ultus-corp/provision.sh
 
 # The applier is pulled in by the role install target. named and unbound are
 # started by the applier after it has written their configuration, so they are
-# not enabled here.
+# not enabled here. The applier unit is shared and ships in the core; this role
+# only enables it.
 for unit in ultus-provision.service ultus-dns-ready.service; do
   systemctl enable "$unit"
   systemctl is-enabled --quiet "$unit" || {

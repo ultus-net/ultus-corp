@@ -25,6 +25,8 @@ assert_eq "role install target shipped" "present" \
   "$(podman run --rm "$img" test -f /usr/lib/systemd/system/ultus-role-install.target && echo present)"
 assert_eq "ready target shipped" "present" \
   "$(podman run --rm "$img" test -f /usr/lib/systemd/system/ultus-deploy-ready.target && echo present)"
+assert_eq "the shared provision unit ships in the core" "present" \
+  "$(podman run --rm "$(core_image)" test -f /usr/lib/systemd/system/ultus-provision.service && echo present)"
 assert_eq "the applier is enabled" "enabled" \
   "$(podman run --rm "$img" systemctl is-enabled ultus-provision.service)"
 assert_ok "the role install target pulls the applier" podman run --rm "$img" \
