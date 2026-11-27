@@ -78,7 +78,23 @@ assert_ok "rendered kea config starts and answers status-get" podman run --rm \
     /usr/libexec/ultus-corp/provision.sh
     kea-dhcp4 -c /etc/kea/kea-dhcp4.conf >/tmp/kea.log 2>&1 &
     pid=$!
-    for _ in $(seq 20); do [ -S /var/run/kea/kea4-ctrl-socket ] && break; sleep 0.5; done
+    # Kill the daemon on every exit path, so a failed probe never leaves it
+    # running and a start failure still prints why.
+    trap "kill $pid 2>/dev/null || true" EXIT
+    for _ in $(seq 30); do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        cat /tmp/kea.log >&2
+        exit 1
+      fi
+      if [ -S /var/run/kea/kea4-ctrl-socket ]; then
+        break
+      fi
+      sleep 1
+    done
+    if [ ! -S /var/run/kea/kea4-ctrl-socket ]; then
+      cat /tmp/kea.log >&2
+      exit 1
+    fi
     python3 - <<PY
 import json, socket, sys
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -98,6 +114,7 @@ reply = json.loads(data)
 sys.exit(0 if reply.get("result") == 0 and reply["arguments"]["sockets"]["status"] == "ready" else 1)
 PY
     kill "$pid"
+    wait "$pid" || true
   '
 
 # $3 is the setup, so the damage lands before the applier reads the file.

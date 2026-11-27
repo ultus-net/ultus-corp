@@ -14,11 +14,11 @@ selected by the node's `profile`.
   The file sets `port=0`, so dnsmasq never answers DNS, and carries one
   `dhcp-relay=<relay address>,<server address>` line. The relay forwards and
   serves nothing itself.
-- The image ships no `kea-dhcp4.conf` and no `dhcp-relay.conf`. The lab
-  renderer writes both from `lab/lab.toml`, and the seed carries the final
-  bytes, so no run's address is baked into a build. The kea package's sample
-  config is removed at build time, because Kea reads that path when it is given
-  none.
+- The kea package ships a sample at the path Kea reads when it is given no
+  configuration, so the build removes it. The image therefore carries no
+  `kea-dhcp4.conf` and no `dhcp-relay.conf`: the lab renderer writes both from
+  `lab/lab.toml`, and the seed delivers the final bytes, so no run's address is
+  baked into a build.
 - `ultus-provision.service` is pulled in by `ultus-role-install.target`, which
   `cloud-init` starts after the seed is written. It reads `profile` from
   `/run/ultus-corp/node.json`, restores the SELinux labels cloud-init cannot
