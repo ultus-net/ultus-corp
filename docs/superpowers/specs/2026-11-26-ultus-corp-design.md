@@ -249,7 +249,7 @@ library, so the renderer needs no dependency at all.
 | D21 | Update plane | Quadlet containers are declared as bootc logically bound images under `/usr/lib/bootc/bound-images.d`, pinned by digest, preloaded by the disk build, and read through `GlobalArgs=--storage-opt=additionalimagestore=/usr/lib/bootc/storage`. No unit sets `AutoUpdate=registry`, and the auto-update timer is masked. Changing an application means building a new host image | A floating container in `/var/lib/containers` is outside the image digest, rollback, offline boot and SBOM. Without the storage argument the unit still uses floating storage; without preloading, a cold boot with no egress has no image | Independent container auto-update; digest pinning that still allows in-place application updates |
 | D22 | Branch footprint | One edge VM per branch. The branch profile runs the overlay plus a local BIND secondary, Unbound, Kea, chrony and a Caddy cache. Authority stays central; details reach the branch by zone transfer or at deploy. Unbound owns the client-facing `:53`, the BIND secondary binds a separate loopback address and port, and Unbound forwards the local zones to it | A branch needs local answers when the tunnel drops, and a second services VM buys nothing. Centralising the serving path would turn a WAN cut into an outage | A second services VM per branch; relaying DHCP and DNS to the hub |
 | D23 | Delivery | Build once and promote the exact qualified digest. The repository records a per-role release manifest; the rollout agent selects the digest with `bootc switch`. The deploy path never rebuilds | A rebuilt deploy is a different artifact from the qualified one, and a mutable tag cannot say what a host runs | Rebuilding at deploy; deploying a tag |
-| D24 | Pipelines | Two. A qualifies a candidate on upstream digest drift, and only the watcher is scheduled. B promotes and rolls out with a canary, waves, halts, parking and a maintenance window | Qualification and rollout fail differently, so they need separate triggers and rates. A daily upstream rebuild must not become a daily fleet reboot | One pipeline; scheduling the deploy |
+| D24 | Pipelines | Two. A qualifies a candidate on upstream digest drift, with the watcher and a qualification heartbeat as the only schedules, and neither deploys. B promotes and rolls out with a canary, waves, halts, parking and a maintenance window | Qualification and rollout fail differently, so they need separate triggers and rates. A daily upstream rebuild must not become a daily fleet reboot | One pipeline; scheduling the deploy |
 | D25 | Update semantics | `bootc upgrade` and `bootc switch` update `/usr` and three-way merge `/etc`; `/var` persists. Per-site seed values stay deploy-time, and gate 15 checks the upgraded managed files against the candidate's expected manifest | An image-default `/etc` change can arrive with an upgrade, but a per-site value cannot be converged on a running host | Treating upgrade as `/usr` only; re-rendering `/etc` at runtime |
 | D26 | Recovery | Recovery follows the store class. Only stateless stores take automatic `bootc rollback`. Durable stores park, page and restore a backup into the matching image; rebuildable stores re-create and run the gate-14 probe | A blind rollback on a durable store leaves newer data on an older binary, the failure D20 exists to prevent | One generic rollback for every class |
 | D27 | Health and routing | The on-host probe has bounded timeouts, absence is failure, and each assertion is retryable or terminal. Failure order is recover, park, notify, and a threshold, timeout or recovery failure halts the waves | A green boot is not a working host, and silence is not success | Port-open checks; first-boot success |
@@ -263,7 +263,8 @@ value schema, the non-secret values and the tests. The image holds what every
 host of a role shares. The `lab` renderer turns `lab/lab.toml` into per-host
 configuration at deployment. Nothing converges per-site configuration after
 deployment. A bootc image rollout (§Delivery and maintenance) is the one
-host-state change, and it does not touch per-site values.
+host-state change. It must not intentionally change per-site values, and gate 15
+fails on an unexpected manifest difference.
 
 | Layer | Owns | Home | Changes on |
 | --- | --- | --- | --- |
@@ -450,7 +451,8 @@ applied, and a locally modified file that differs from `/usr/etc` is retained.
 `/var` persists. An image-default change to `/etc` can therefore arrive with an
 upgrade, while a per-site seed value remains deploy-time and needs a new VM. Gate
 15 compares the upgraded host's managed files against the candidate's expected
-manifest, not the previous release's baseline.
+manifest, not the previous release's baseline, and fails on an unexpected
+difference.
 
 ### Recovery per class
 
@@ -904,7 +906,7 @@ the signature-policy flags remain to confirm (§Left to the builder).
 | Package gaps in Stream 10 | Roles do not resolve | EPEL 10 and vendor repositories, confirmed per role before s5 |
 | A libvirt network bridges to the home LAN | The lab leaks DHCP or DNS | The isolation gate fails the build |
 | A blind rollback hits a durable store | Newer data is read by an older binary | D26 routes durable failures to park and restore; only stateless stores take automatic rollback |
-| The `/etc` merge overwrites a deploy-rendered file | A per-site value changes under the host | Seed-rendered files are in the candidate's expected manifest, which gate 15 checks after an upgrade; a per-site change is a new seed |
+| The `/etc` merge overwrites a deploy-rendered file | A per-site value changes under the host | Seed-rendered files are in the candidate's expected manifest, which gate 15 checks after an upgrade and fails on an unexpected difference; a per-site change is a new seed |
 | A parked digest is retried | A known-bad image returns | Parking is terminal for that digest; the next attempt needs a new build |
 | The watcher goes silent | The fleet stops updating with no signal | The dead-man's switch pages after 24 hours, and registry-unreachable is distinguished from no-update |
 | A tag is moved to a different digest | A host runs an unqualified image | Promotion records and selects the digest; tags are never trusted |
