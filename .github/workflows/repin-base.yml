@@ -1,0 +1,44 @@
+name: repin-base
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  repin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v3
+      - name: Verify the signer before trusting any digest
+        run: |
+          set -euo pipefail
+          ref=$(head -n 1 manifests/base.txt | sed 's/@sha256:.*//')
+          digest=$(skopeo inspect --format '{{.Digest}}' "docker://$ref")
+          echo "REF=$ref" >> "$GITHUB_ENV"
+          echo "DIGEST=$digest" >> "$GITHUB_ENV"
+          bash build/repin.sh manifests/base.signer "$ref@$digest"
+      - name: Rewrite the pin only after verification
+        run: |
+          set -euo pipefail
+          printf '%s@%s\n' "$REF" "$DIGEST" > manifests/base.txt
+          git diff --exit-code manifests/base.txt && echo "CHANGED=false" >> "$GITHUB_ENV" \
+            || echo "CHANGED=true" >> "$GITHUB_ENV"
+      - if: env.CHANGED == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: chore/repin-base
+          title: "chore: repin the bootc base"
+          commit-message: "chore: repin the bootc base"
+          body: |
+            A verified signature named the new base digest.
+
+            The weekly job verifies `manifests/base.signer` before it writes the
+            pin. An unknown or incomplete signer fails the job and opens no PR.
+          add-paths: manifests/base.txt
