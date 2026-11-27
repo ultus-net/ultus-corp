@@ -240,8 +240,8 @@ library, so the renderer needs no dependency at all.
 | D17 | Endpoint management | Fleet for inventory and policy, PXE for Linux and WinPE, macOS by profile | One plane for a mixed fleet, and onboarding from blank | Intune, which needs Entra; client VMs only, which leaves onboarding manual |
 | D18 | 802.1X authenticator | `hostapd` with the wired driver on the users bridge | Gives real supplicants a real authenticator, not just `eapol_test` | `eapol_test` only, which proves the server and nothing else |
 | D19 | Integration evidence | A static interface-composition check plus a dated assembly run | Composition is checked continuously where it can be, and sampled where it cannot | Assuming a green scenario proves the network |
-| D20 | Rollback contract | A per-role restore procedure, recorded in the role's runbook and exercised by its scenario. Stateless roles redeploy the previous image; config-only roles redeploy the previous image and seed; stateful roles are forward-only with a quiesced, application-consistent backup and a restore into a matching image | `/var` persists across deployments, and database schemas are not reliably reversible. A filesystem snapshot is not an application-consistent backup, and older binaries against newer data is an outage, not a rollback | Treating `bootc rollback` as a data rollback; one generic snapshot rule for every role |
-| D21 | Update plane | Quadlet containers are declared as bootc logically bound images under `/usr/lib/bootc/bound-images.d` and pinned by digest. No unit sets `AutoUpdate=registry`, and the auto-update timer is masked | A floating container in `/var/lib/containers` is outside the image digest, rollback, offline boot and SBOM. A bound image follows the bootc deployment and is present before the network is up | Independent container auto-update; an implicit second artifact plane |
+| D20 | Rollback contract | A per-role restore procedure, recorded in the role's runbook. Stateless roles redeploy the previous image; config-only roles redeploy the previous image and seed; stateful roles are forward-only with a quiesced, application-consistent backup and a restore into a matching image. Gate 12 exercises one role per class, and each remaining role's first restore is dated runbook evidence | `/var` persists across deployments, and database schemas are not reliably reversible. A filesystem snapshot is not an application-consistent backup, and older binaries against newer data is an outage, not a rollback | Treating `bootc rollback` as a data rollback; one generic snapshot rule for every role |
+| D21 | Update plane | Quadlet containers are declared as bootc logically bound images under `/usr/lib/bootc/bound-images.d`, pinned by digest, preloaded by the disk build, and read through `GlobalArgs=--storage-opt=additionalimagestore=/usr/lib/bootc/storage`. No unit sets `AutoUpdate=registry`, and the auto-update timer is masked. Changing an application means building a new host image | A floating container in `/var/lib/containers` is outside the image digest, rollback, offline boot and SBOM. Without the storage argument the unit still uses floating storage; without preloading, a cold boot with no egress has no image | Independent container auto-update; digest pinning that still allows in-place application updates |
 
 ## Configuration and deployment inputs
 
@@ -262,20 +262,25 @@ Rules:
 1. A change that would make two hosts from the same digest differ in `/usr`
    belongs in the image.
 2. A per-instance value is declared in `lab/lab.toml` or `lab-secrets/`. The
-   `lab` renderer turns it into a file at deployment. The guest never templates
-   it, and an operator never edits it on the host.
+   `lab` renderer turns it into a file at deployment. The guest never renders a
+   `lab` template, and an operator never edits the file on the host.
 3. The seed carries deployment inputs only: identity, the rendered per-role
    configuration, and the secret material a role needs at first boot. It carries
    no packages and no build steps.
-4. `cloud-init` runs once per instance. The seed is mode 0600, is never logged,
-   and is deleted after the first successful boot. Material that must persist,
-   such as a host key, is written only to its `0600` file.
+4. `cloud-init` runs once per instance. The seed is mode 0600 and is never
+   logged. When deployment ends, the `lab` CLI ejects the seed from the live and
+   persistent domain definitions, deletes it, and marks it consumed so teardown
+   tolerates its absence. Cached user-data is scrubbed. The gate asserts that
+   one-time secrets are absent from the cloud-init cache and the logs, and that
+   the seed file is gone.
 5. A role that needs a first-boot install ships an idempotent, fail-closed
-   oneshot unit. That install may write `/etc` and `/var` and enable units.
-   Deployment ends when `cloud-init` and the role's installer both report
-   success; before that the host is not in service.
-6. After deployment ends, nothing mutates host files. Runtime automation may
-   change API objects only.
+   oneshot unit. That install may write `/etc` and `/var`, enable units, and
+   render the vendor's own configuration from the supplied inputs. It never runs
+   a `lab` template. Deployment ends when `cloud-init` and the role's installer
+   both report success; before that the host is not in service.
+6. After deployment ends, nothing converges configuration. Applications may
+   write their own state under `/var`. Runtime automation may change API objects
+   only.
 7. A drifted host is re-rendered from the repository or replaced, not repaired.
 
 ## Rollback and upgrade
@@ -283,11 +288,15 @@ Rules:
 A stateful role never rolls back by image alone. Its runbook names the quiesce
 step, the backup method, the restore order and the image it restores into.
 
+The classes partition the 17 roles by profile. `dns` is the one role split across
+two classes, because the primary holds zone data and the secondary re-transfers
+from it.
+
 | Class | Roles | Rollback |
 | --- | --- | --- |
-| Stateless | edge, ntp, proxy, radius | `bootc rollback` to the previous image |
-| Config-only | dns (secondary) | previous image plus the previous seed |
-| Application state | dhcp, pki, ipa, app, registry, mon, secrets, mdm, ipam | quiesce writes, back up with the application's tool, restore into the matching image |
+| Stateless | ntp, proxy | `bootc rollback` to the previous image |
+| Config-only | dns (secondary), edge, radius | previous image plus the previous seed |
+| Application state | dns (primary), dhcp, pki, ipa, app, registry, mon, secrets, mdm, ipam | quiesce writes, back up with the application's tool, restore into the matching image |
 | File-backed | deploy, print, file | quiesce, back up the share, restore into the matching image |
 
 ## Target architecture
@@ -374,7 +383,7 @@ generated, schema-checked and handed to a real Mac, not booted here.
 
 | Debuts in | Role | Image | Stateful? |
 | --- | --- | --- | --- |
-| s0 | dns | BIND 9, Unbound | secondary only |
+| s0 | dns | BIND 9, Unbound | zone data at the primary; the secondary re-transfers |
 | s2 | dhcp | Kea, lease store | yes |
 | s3 | edge | FRR, nftables, WireGuard, DHCP relay, `hostapd`; `branch` and `hub` profiles | config only |
 | s3 | ntp | chrony | no |
@@ -512,15 +521,18 @@ docs/                           design, plans, runbooks
 8. Supply chain: trivy, SBOM, cosign keyless.
 9. Isolation: a test asserts no libvirt network forwards to the host LAN and
    that the lab ranges do not overlap the host's.
-10. Managed files: each scenario records a checksum manifest of every file the
-    deployment renders, asserts the manifest is unchanged after a second boot,
-    and fails when a negative test hand-edits one managed file.
-11. Deployment: `cloud-init` and each role oneshot report exactly one successful
-    run after two boots, and the seed ISO is gone after the first success.
+10. Managed files: each scenario records a checksum manifest of every declared
+    managed configuration file, including image-supplied and installer-generated
+    files, against its expected post-install state. It asserts the manifest is
+    unchanged after a second boot, and fails when a negative test hand-edits one
+    managed file.
+11. Deployment: the per-instance deployment application reports exactly one
+    success after two boots. `cloud-init` per-boot stages are excluded from the
+    count. The seed is ejected and deleted, and the cached user-data is scrubbed.
 12. Rollback: one role from each class in `§Rollback and upgrade` is exercised.
     A stateless role returns to the previous image, a config-only role to the
     previous image and seed, and a stateful role restores its backup into the
-    matching image.
+    matching image. The gate is not satisfied until every class has run.
 13. Reproducibility: the build consumes a lock of resolved NEVRA versions, and a
     package transaction outside the lock fails the build.
 
@@ -589,8 +601,9 @@ Two consequences, both already reflected in the plan:
 | Integration evidence is sampled | A cross-component breakage survives a green scenario | The interface-composition gate plus a dated assembly run |
 | The third branch never runs | A three-branch interaction is never observed | `assembly-branches` proves two branches plus the hub, and the third stays spec-tested and documented |
 | Teardown leaks state | A stale network or volume breaks the next scenario | The teardown gate, which re-runs `up` after `down` |
-| Stateful rollback runs older binaries | A rollback boots a previous image against data written by the newer one | D20: the 12 stateful roles are forward-only, with a quiesced backup and a restore into the matching image |
-| The seed ISO carries secrets | A retained ISO exposes keys and an enrolment token | Mode 0600, never logged, deleted after the first successful boot; the teardown gate asserts absence |
+| Stateful rollback runs older binaries | A rollback boots a previous image against data written by the newer one | D20: the 13 stateful roles are forward-only, with a quiesced backup and a restore into the matching image |
+| The seed ISO carries secrets | A retained ISO exposes keys and an enrolment token | Mode 0600, never logged, ejected and deleted when deployment ends; cached user-data is scrubbed; the teardown gate asserts absence |
+| A bound image is absent on a cold boot | A Quadlet starts before its image is available | Preload the bound images during the disk build and test a cold boot with egress off |
 | Mutable Stream repositories | Two builds of the same image install different NEVRAs | A resolved NEVRA lock is consumed by the build; gate 13 |
 | libvirt tooling absent | s0 cannot start | Install libvirt, `virt-install` and a seed ISO tool, then prove one guest boots |
 | `hostapd` wired driver is unproven here | Real supplicants cannot complete 802.1X | Verify it in s6 before the endpoint gate; `eapol_test` remains the server proof |

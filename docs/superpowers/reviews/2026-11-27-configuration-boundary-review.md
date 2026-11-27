@@ -87,9 +87,11 @@ enrolment token with no stated permissions, deletion or log rule.
 
 Change: the `lab` renderer writes per-role configuration into the seed, and the
 guest copies it into place. The seed carries identity, rendered configuration and
-first-boot secret material only. It is mode 0600, never logged, and deleted after
-the first successful boot. Build-time scripts enable units; they never consume a
-deployment value.
+first-boot secret material only. It is mode 0600, never logged, and ejected and
+deleted when deployment ends; teardown tolerates its absence, so a later `up` and
+`down` still work. Cached user-data is scrubbed, because `cloud-init` retains the
+raw input under `/var/lib/cloud/instance/`. Build-time scripts enable units; they
+never consume a deployment value.
 
 ### F2. Atomic rollback is not a data rollback (P1)
 
@@ -98,9 +100,10 @@ s0 (`:149`), which boots one stateless role.
 
 Twelve of the 17 roles in the roles table are stateful (`:326-344`): nine carry
 application state (dhcp, pki, ipa, app, registry, mon, secrets, mdm, ipam) and
-three are file-backed (deploy, print, file). bootc reverts `/usr`; `/var`
-persists across deployments, and the bootc filesystem documentation says a
-rollback "should not affect this application data".
+three are file-backed (deploy, print, file). The spec change below moves the DNS
+primary into application state as well, taking the count to 13. bootc reverts
+`/usr`; `/var` persists across deployments, and the bootc filesystem
+documentation says a rollback "should not affect this application data".
 
 Schema downgrade is not a safe assumption: NetBox migrations are not guaranteed
 reversible, and Keycloak reports that a downgraded server cannot use an upgraded
@@ -121,11 +124,14 @@ outside offline boot, and outside the image SBOM. Disabling auto-update removes
 the second update trigger but does not put the image in the artifact.
 
 Change: declare the Quadlets as bootc logically bound images under
-`/usr/lib/bootc/bound-images.d`, pinned by digest. The bound set follows the
-bootc deployment, is present before the network is up, and rolls back with it.
-The alternative is to accept a second artifact plane explicitly, with its own
-signing, scanning, availability and rollback contract. The draft should not leave
-this implicit.
+`/usr/lib/bootc/bound-images.d`, pinned by digest, and set
+`GlobalArgs=--storage-opt=additionalimagestore=/usr/lib/bootc/storage` on each
+unit so it reads the bootc store. Preload the images during the disk build, and
+prove a cold boot with egress off still starts them. The bound set follows the
+bootc deployment, so an application update is a host image build, not an
+in-place pull. The alternative is to accept a second artifact plane explicitly,
+with its own signing, scanning, availability and rollback contract. The draft
+should not leave this implicit.
 
 ### F4. The drift gate cannot test what it names (P2)
 
@@ -148,7 +154,8 @@ and the draft never names it. `bootc container lint` also warns about missing
 
 Change: a oneshot contract per role: idempotent, fail-closed, runs once, asserted
 by its scenario. Deployment ends when that unit and `cloud-init` both succeed.
-The install may write `/etc` and `/var`; nothing may write them afterwards.
+The install may write `/etc` and `/var`; nothing may converge them afterwards.
+The application writes its own state under `/var` as it runs.
 
 ### F6. The transfer claim fails for DNS (P2)
 
@@ -255,13 +262,15 @@ FreeIPA, Kea or Fleet, so it would be a third tool for partial coverage.
 
 The spec commit accepts the findings into the draft:
 
-- D20: a per-role rollback contract, with a rollback-class table.
-- D21: Quadlets as bootc logically bound images, pinned by digest.
+- D20: a per-role rollback contract, with a profile-level class table.
+- D21: Quadlets as bootc logically bound images, pinned by digest, read through
+  the additional image store, and preloaded so a cold boot with egress off works.
 - `§Configuration and deployment inputs`: the four-layer model, the seed
   contract, the secrecy lifecycle, and when deployment ends.
 - Gates 10 to 13: managed-file integrity, deployment counts, rollback by class,
   and build reproducibility.
-- Risk rows for stateful rollback, the seed ISO and mutable Stream repositories.
+- Risk rows for stateful rollback, the seed ISO, a missing bound image on a cold
+  boot, and mutable Stream repositories.
 - The missing server install medium in `§Not proven here`.
 
 No runtime dependency is added and no tool is adopted. The only optional
@@ -279,7 +288,8 @@ aspirational:
 | The gate tasks | Add the managed-file manifest, the invocation counts, one negative hand-edit test, and the lock gate |
 
 P0 proves s0, which is stateless. The first stateful plan must add one upgrade
-and restore, or F2 stays untested.
+and restore, or F2 stays untested. Gate 12 is not a P0 exit criterion: it stays
+open until one role from each class has run.
 
 ## 7. What would change this recommendation
 
