@@ -54,7 +54,8 @@ Top-level keys inside a site are invalid.
 | `prefix` | string | yes | - | empty or invalid CIDR |
 
 Each site is an address prefix (e.g., `10.100.0.0/16`). The renderer creates
-one libvirt network per segment within this prefix.
+one libvirt network per segment within this prefix. The shipped spec has a `dc`
+site on `10.100.0.0/16` and a `branch` site on `10.200.0.0/16`.
 
 ### `[[site.segment]]` tables
 
@@ -64,8 +65,13 @@ Under each site, segment items are in a list keyed by `[site.segment]`.
 |-----|------|----------|---------|-----------|
 | `name` | string | yes | - | empty or duplicate within site |
 | `cidr` | string | yes | - | empty or invalid CIDR |
+| `pool` | string | no | - | not a `start - end` range, unordered, outside the segment CIDR, or containing a static interface address |
 
-Segments are VLAN-like named networks (e.g., `mgmt`, `data`).
+Segments are VLAN-like named networks (e.g., `mgmt`, `data`). A segment name
+resolves in the node's own site first, then across all sites. Two sites that
+define the same name are rejected, because both would render a network with the
+same libvirt name. `pool` is the Kea range and normalises to
+`"<start> - <end>"`.
 
 ## `[[scenario]]` tables
 
@@ -89,7 +95,8 @@ Top-level keys inside a node are invalid.
 | `scenario` | string | yes | - | empty, or a scenario that does not exist |
 | `name` | string | yes | - | empty or duplicate |
 | `site` | string | yes | - | empty, or a site that does not exist |
-| `role` | string | yes | - | - |
+| `role` | string | yes | - | not `dns`, `dhcp` or `client` |
+| `profile` | string | yes for `dhcp`, rejected otherwise | - | missing on a `dhcp` node, present on another role |
 | `secondary` | string | no | - | names a node that does not exist, belongs to another scenario, or is itself a secondary |
 | `vcpus` | integer | yes | - | < 1 |
 | `ram_mib` | integer | yes | - | < 1 |
@@ -111,14 +118,21 @@ Under each node, interface items are in a list keyed by `[node.interface]`.
 
 | Key | Type | Required | Default | Rejection |
 |-----|------|----------|---------|-----------|
-| `segment` | string | yes | - | empty or no-existent segment |
-| `address` | string | yes | - | empty or outside segment CIDR |
-| `gateway` | string | no | "0.0.0.0" | - |
+| `segment` | string | yes | - | empty, no such segment, or defined in more than one site |
+| `address` | string | yes when `mode = "static"` | - | empty or outside segment CIDR |
+| `gateway` | string | no | none | outside segment CIDR |
 | `nameservers` | list of strings | no | [] | not a list or contains empty/invalid IPs |
+| `mode` | string | no | "static" | not `static` or `dhcp`, or `dhcp` outside a `client` role |
+| `routes` | list of tables | no | [] | `to` is not a network, or `via` is outside the owning segment |
 
-Interfaces are declared per segment and must carry a valid address within that
-segment's CIDR. The renderer generates a unique MAC per interface using
-SHA-256 hashing of the scenario-node-segment string.
+Interfaces are declared per segment. A static interface carries a valid address
+within that segment's CIDR. `gateway` is optional: when absent the interface
+gets no default route. A `dhcp` interface emits only a MAC match and `dhcp4`,
+and rejects `address`, `gateway`, `nameservers` and `routes`. `mode = "dhcp"`
+is client-only. The first interface of every node must be static, because
+`lab up` waits for the deployment record on that address. The renderer
+generates a unique MAC per interface using SHA-256 hashing of the
+scenario-node-segment string.
 
 ## Validation summary
 

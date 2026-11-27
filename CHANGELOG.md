@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+- feat: render a cross-site interface and a DHCP client mode
 - chore: merge the updated design from `main` and the delivery model from `docs/branch-footprint`, which `main` never received; the design now carries one sequence of decisions D1 to D33 and gates 1 to 16
 - feat: repository skeleton, evidence recorder and static gate ([Task 1](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md))
 - feat: pinned base, build argument and first role image ([Task 2](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md)); each gate now writes its own evidence file under `run/evidence/`

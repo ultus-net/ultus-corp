@@ -20,9 +20,13 @@ from lab.render import (
     node_identity,
     primary_of,
     secondaries_of,
+    scenario_segments,
+    kea_conf_text,
+    relay_conf_text,
     Spec,
     Node,
     Segment,
+    Interface as RenderInterface,
 )
 
 
@@ -30,11 +34,36 @@ class TestLoad(unittest.TestCase):
     def test_load_valid_spec(self):
         spec = load("lab/lab.toml")
         self.assertIsInstance(spec, Spec)
-        self.assertEqual(len(spec.sites), 1)
+        self.assertEqual(sorted(spec.sites), ["branch", "dc"])
 
     def test_load_unknown_key(self):
         with self.assertRaises(ValueError):
             load("tests/fixtures/lab-unknown-key.toml")
+
+    def test_load_ambiguous_segment(self):
+        with self.assertRaises(ValueError) as cm:
+            load("tests/fixtures/lab-ambiguous-segment.toml")
+        self.assertIn("branch", str(cm.exception))
+
+    def test_load_dhcp_on_dns(self):
+        with self.assertRaises(ValueError) as cm:
+            load("tests/fixtures/lab-dhcp-on-dns.toml")
+        self.assertIn("profile", str(cm.exception))
+
+    def test_load_profile_missing(self):
+        with self.assertRaises(ValueError) as cm:
+            load("tests/fixtures/lab-profile-missing.toml")
+        self.assertIn("profile", str(cm.exception))
+
+    def test_load_mode_unknown(self):
+        with self.assertRaises(ValueError) as cm:
+            load("tests/fixtures/lab-mode-unknown.toml")
+        self.assertIn("mode", str(cm.exception))
+
+    def test_load_dhcp_first(self):
+        with self.assertRaises(ValueError) as cm:
+            load("tests/fixtures/lab-dhcp-first.toml")
+        self.assertIn("static first", str(cm.exception))
 
 
 class TestNodesFor(unittest.TestCase):
@@ -412,3 +441,96 @@ class TestTopology(unittest.TestCase):
     def test_a_secondary_cannot_copy_a_secondary(self):
         with self.assertRaises(ValueError):
             load("tests/fixtures/lab-secondary-of-secondary.toml")
+
+    def test_main_writes_every_site_network(self):
+        import tempfile
+        from lab.render import main
+
+        with tempfile.TemporaryDirectory() as out:
+            self.assertEqual(main(["render.py", "--scenario", "s2-dhcp", "--out", out]), 0)
+            self.assertEqual(
+                sorted(p.name for p in Path(out).glob("*.network.xml")),
+                ["s2-dhcp-lan.network.xml", "s2-dhcp-mgmt.network.xml"],
+            )
+
+
+class TestS2Spec(unittest.TestCase):
+    def test_three_nodes(self):
+        spec = load("lab/lab.toml")
+        self.assertEqual(
+            [n.name for n in nodes_for(spec, "s2-dhcp")],
+            ["dhcp-a", "relay-a", "client-a"],
+        )
+
+    def test_relay_lan_interface_comes_from_the_branch_site(self):
+        spec = load("lab/lab.toml")
+        relay = next(n for n in nodes_for(spec, "s2-dhcp") if n.name == "relay-a")
+        lan = next(i for i in relay.interfaces if i.segment == "lan")
+        self.assertEqual(lan.site, "branch")
+
+    def test_scenario_segments_spans_sites(self):
+        spec = load("lab/lab.toml")
+        names = [s.name for s in scenario_segments(spec, "s2-dhcp")]
+        self.assertEqual(sorted(names), ["lan", "mgmt"])
+
+    def test_management_route_is_rendered(self):
+        spec = load("lab/lab.toml")
+        server = nodes_for(spec, "s2-dhcp")[0]
+        network = json.loads(seed_files(server, spec)["network-config"])
+        self.assertIn(
+            {"to": "10.200.10.0/24", "via": "10.100.10.22"},
+            network["ethernets"]["eth0"]["routes"],
+        )
+
+    def test_dhcp_interface_has_no_address(self):
+        spec = load("lab/lab.toml")
+        client = next(n for n in nodes_for(spec, "s2-dhcp") if n.name == "client-a")
+        network = json.loads(seed_files(client, spec)["network-config"])
+        self.assertEqual(network["ethernets"]["eth1"], {
+            "match": {"macaddress": interface_mac("s2-dhcp", "client-a", "lan")},
+            "dhcp4": True,
+        })
+
+    def test_relay_lan_interface_has_no_default_route(self):
+        spec = load("lab/lab.toml")
+        relay = next(n for n in nodes_for(spec, "s2-dhcp") if n.name == "relay-a")
+        network = json.loads(seed_files(relay, spec)["network-config"])
+        self.assertNotIn("routes", network["ethernets"]["eth1"])
+
+    def test_kea_config_names_the_pool_and_relay(self):
+        spec = load("lab/lab.toml")
+        server = nodes_for(spec, "s2-dhcp")[0]
+        conf = json.loads(kea_conf_text(server, spec))["Dhcp4"]
+        subnet = conf["subnet4"][0]
+        self.assertEqual(subnet["id"], 1)
+        self.assertEqual(subnet["subnet"], "10.200.10.0/24")
+        self.assertEqual(subnet["pools"], [{"pool": "10.200.10.100 - 10.200.10.199"}])
+        self.assertEqual(subnet["relay"]["ip-addresses"], ["10.200.10.254"])
+
+    def test_kea_config_sends_no_router_option(self):
+        spec = load("lab/lab.toml")
+        server = nodes_for(spec, "s2-dhcp")[0]
+        self.assertNotIn("routers", kea_conf_text(server, spec))
+
+    def test_relay_config_names_its_server(self):
+        spec = load("lab/lab.toml")
+        relay = next(n for n in nodes_for(spec, "s2-dhcp") if n.name == "relay-a")
+        conf = relay_conf_text(relay, spec)
+        self.assertIn("port=0", conf)
+        self.assertIn("dhcp-relay=10.200.10.254,10.100.10.21", conf)
+
+    def test_managed_files_per_profile(self):
+        spec = load("lab/lab.toml")
+        nodes = {n.name: n for n in nodes_for(spec, "s2-dhcp")}
+        self.assertEqual(list(managed_files(nodes["dhcp-a"], spec)),
+                         ["/etc/kea/kea-dhcp4.conf"])
+        self.assertEqual(list(managed_files(nodes["relay-a"], spec)),
+                         ["/etc/ultus-corp/dhcp-relay.conf"])
+        self.assertEqual(managed_files(nodes["client-a"], spec), {})
+
+    def test_identity_carries_the_dhcp_cidr(self):
+        spec = load("lab/lab.toml")
+        client = next(n for n in nodes_for(spec, "s2-dhcp") if n.name == "client-a")
+        identity = node_identity(client, spec)
+        self.assertEqual(identity["dhcp_interfaces"],
+                         [{"segment": "lan", "cidr": "10.200.10.0/24"}])

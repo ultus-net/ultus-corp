@@ -1,0 +1,35 @@
+[lab]
+realm = "LAB.INTERNAL"
+domain = "lab.internal"
+overlay = "10.255.0.0/16"
+
+[[site]]
+id = "dc"
+prefix = "10.100.0.0/16"
+
+  [[site.segment]]
+  name = "mgmt"
+  cidr = "10.100.10.0/24"
+
+[[scenario]]
+id = "s1-dns"
+title = "authoritative plus recursive"
+vm_budget = 3
+ram_budget_mib = 4096
+
+[[node]]
+scenario = "s1-dns"
+name = "dns-a"
+site = "dc"
+role = "dns"
+profile = "server"
+vcpus = 1
+ram_mib = 1024
+disk_gib = 8
+
+  [[node.interface]]
+  segment = "mgmt"
+  address = "10.100.10.11"
+  gateway = "10.100.10.1"
+  nameservers = ["10.100.10.11"]
+  mode = "dhcp"

@@ -46,15 +46,6 @@ def load_spec() -> render.Spec:
         fail(f"spec error: {exc}")
 
 
-def scenario_segments(spec: render.Spec, scenario: str) -> list[render.Segment]:
-    seen: dict[str, render.Segment] = {}
-    for node in render.nodes_for(spec, scenario):
-        site = spec.sites[node.site]
-        for iface in node.interfaces:
-            seen.setdefault(iface.segment, site.segments[iface.segment])
-    return list(seen.values())
-
-
 def ssh_key() -> str:
     secrets = ROOT / "lab-secrets"
     secrets.mkdir(mode=0o700, exist_ok=True)
@@ -273,7 +264,7 @@ def cmd_up(args: argparse.Namespace) -> int:
     runstate.write(state_file, state)
 
     try:
-        for segment in scenario_segments(spec, scenario):
+        for segment in render.scenario_segments(spec, scenario):
             name = f"ultus-{scenario}-{segment.name}"
             xml = render_dir / f"{scenario}-{segment.name}.network.xml"
             xml.write_text(render.network_xml(scenario, segment, spec), encoding="utf-8")
@@ -359,7 +350,10 @@ def force_names(spec: render.Spec, scenario: str) -> list[tuple[str, str]]:
     """Only names the spec derives, never a bare prefix match."""
     nodes = render.nodes_for(spec, scenario)
     found = [("domain", node.name) for node in nodes]
-    found += [("network", segment.name) for segment in scenario_segments(spec, scenario)]
+    found += [
+        ("network", segment.name)
+        for segment in render.scenario_segments(spec, scenario)
+    ]
     return found
 
 

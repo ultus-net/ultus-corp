@@ -19,14 +19,10 @@ spec = render.load("lab/lab.toml")
 cidrs, budget = [], []
 for scenario in spec.scenarios:
     nodes = render.nodes_for(spec, scenario)
-    segments = {}
-    for node in nodes:
-        site = spec.sites[node.site]
-        for iface in node.interfaces:
-            segments[iface.segment] = site.segments[iface.segment]
+    segments = render.scenario_segments(spec, scenario)
     if not segments:
         raise SystemExit(f"{scenario} declares no segment")
-    for segment in segments.values():
+    for segment in segments:
         (out / f"{scenario}-{segment.name}.xml").write_text(
             render.network_xml(scenario, segment, spec), encoding="utf-8"
         )

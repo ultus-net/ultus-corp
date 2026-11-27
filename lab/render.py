@@ -24,6 +24,30 @@ DEPLOYMENT_ID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 
+
+def _parse_pool(pool_raw: str, segment_cidr: ipaddress.IPv4Network) -> str:
+    """Normalise a Kea range such as '10.200.10.100 - 10.200.10.199'.
+
+    A range must be ordered and stay inside the segment network.
+    """
+    parts = pool_raw.split("-")
+    if len(parts) != 2:
+        raise ValueError(f"invalid pool format: {pool_raw!r}")
+
+    try:
+        pool_start = ipaddress.IPv4Address(parts[0].strip())
+        pool_end = ipaddress.IPv4Address(parts[1].strip())
+    except ValueError as exc:
+        raise ValueError(f"pool contains invalid addresses: {pool_raw!r}") from exc
+
+    if pool_start > pool_end:
+        raise ValueError(f"pool start {pool_start} is after end {pool_end}")
+    if pool_start not in segment_cidr or pool_end not in segment_cidr:
+        raise ValueError(f"pool range {pool_start}-{pool_end} is outside {segment_cidr}")
+
+    return f"{pool_start} - {pool_end}"
+
+
 __all__ = [
     "Lab",
     "Dns",
@@ -32,6 +56,7 @@ __all__ = [
     "Segment",
     "Scenario",
     "Interface",
+    "Route",
     "Node",
     "Spec",
     "load",
@@ -49,6 +74,9 @@ __all__ = [
     "domain_xml",
     "seed_files",
     "interface_mac",
+    "scenario_segments",
+    "kea_conf_text",
+    "relay_conf_text",
 ]
 
 TOP_KEYS = {"lab", "dns", "site", "scenario", "node"}
@@ -56,20 +84,22 @@ LAB_KEYS = {"realm", "domain", "overlay"}
 DNS_KEYS = {"serial", "ttl", "refresh", "retry", "expire", "minimum", "delegate"}
 DELEGATE_KEYS = {"name", "ns", "address"}
 SITE_KEYS = {"id", "prefix", "segment"}
-SEGMENT_KEYS = {"name", "cidr"}
+SEGMENT_KEYS = {"name", "cidr", "pool"}
 SCENARIO_KEYS = {"id", "title", "vm_budget", "ram_budget_mib"}
 NODE_KEYS = {
     "scenario",
     "name",
     "site",
     "role",
+    "profile",
     "secondary",
     "vcpus",
     "ram_mib",
     "disk_gib",
     "interface",
 }
-IFACE_KEYS = {"segment", "address", "gateway", "nameservers"}
+IFACE_KEYS = {"segment", "address", "gateway", "nameservers", "mode", "routes"}
+ROUTE_KEYS = {"to", "via"}
 
 
 @dataclass(frozen=True)
@@ -107,6 +137,7 @@ class Dns:
 class Segment:
     name: str
     cidr: str
+    pool: str | None = None
 
 
 @dataclass(frozen=True)
@@ -129,9 +160,18 @@ class Interface:
     scenario: str
     node: str
     segment: str
-    address: str
-    gateway: str
+    address: str | None
+    gateway: str | None
     nameservers: list[str]
+    mode: str
+    site: str
+    routes: tuple[Route, ...] = ()
+
+
+@dataclass(frozen=True)
+class Route:
+    to: str
+    via: str
 
 
 @dataclass(frozen=True)
@@ -140,6 +180,7 @@ class Node:
     name: str
     site: str
     role: str
+    profile: str | None
     vcpus: int
     ram_mib: int
     disk_gib: int
@@ -180,6 +221,138 @@ def interface_mac(scenario: str, node: str, segment: str) -> str:
     digest = hashlib.sha256(f"{scenario}-{node}-{segment}".encode()).digest()
     first = (digest[0] | 0x02) & 0xFE
     return ":".join(f"{b:02x}" for b in (first, *digest[1:6]))
+
+
+def _segment_in(sites: dict[str, Site], site_id: str, name: str) -> tuple[str, Segment]:
+    """Resolve a segment name to the site that owns it.
+
+    The name is unique across the spec: a second site that defines it is an
+    error naming every site, because both would render the same network name.
+    """
+    matches = [
+        (other_id, site.segments[name])
+        for other_id, site in sites.items()
+        if name in site.segments
+    ]
+    if not matches:
+        raise ValueError(f"segment {name!r} not found for site {site_id!r}")
+    if len(matches) > 1:
+        found = ", ".join(sorted(other_id for other_id, _ in matches))
+        raise ValueError(f"segment {name!r} is defined in multiple sites: {found}")
+    return matches[0]
+
+
+def _segment_for(spec: Spec, site_id: str, name: str) -> tuple[str, Segment]:
+    """Resolve a segment name against the whole spec's sites."""
+    return _segment_in(spec.sites, site_id, name)
+
+
+def _served_interface(node: Node, spec: Spec) -> Interface:
+    """The relay interface whose segment has a pool.
+
+    The mode is irrelevant: a relay interface is static. Zero or more than one
+    matching interface is a ValueError.
+    """
+    pools = [
+        iface
+        for iface in node.interfaces
+        if spec.sites[iface.site].segments[iface.segment].pool is not None
+    ]
+    if len(pools) == 0:
+        raise ValueError(f"no pool on any interface for {node.name} in {node.scenario}")
+    if len(pools) > 1:
+        raise ValueError(f"more than one pool interface for {node.name} in {node.scenario}")
+    return pools[0]
+
+
+def _profile_node(node: Node, spec: Spec, profile: str) -> Node:
+    """The only node in the scenario with that profile.
+
+    Raises ValueError when not found or not unique.
+    """
+    nodes = [n for n in nodes_for(spec, node.scenario) if n.profile == profile]
+    if not nodes:
+        raise ValueError(f"no node with profile {profile} in {node.scenario}")
+    if len(nodes) > 1:
+        site_ids = sorted(n.site for n in nodes)
+        raise ValueError(
+            f"multiple nodes with profile {profile} in {node.scenario} "
+            f"in sites {', '.join(site_ids)}"
+        )
+    return nodes[0]
+
+
+def scenario_segments(spec: Spec, scenario: str) -> list[Segment]:
+    """Return each segment once, across every site the scenario uses.
+
+    Two sites in one scenario that provide the same segment name are an error
+    because both would render a network with the same libvirt name.
+    """
+    if scenario not in spec.scenarios:
+        raise ValueError(f"unknown scenario: {scenario}")
+
+    segments: dict[str, Segment] = {}
+    for node in nodes_for(spec, scenario):
+        for iface in node.interfaces:
+            _, segment = _segment_for(spec, iface.site, iface.segment)
+            segments.setdefault(segment.name, segment)
+
+    return list(segments.values())
+
+
+def kea_conf_text(node: Node, spec: Spec) -> str:
+    """The Kea JSON for a server node.
+
+    Only the DHCP4 configuration is needed; the client is not service-aware.
+    """
+    relay = _profile_node(node, spec, "relay")
+    served = _served_interface(relay, spec)
+    segment = spec.sites[served.site].segments[served.segment]
+
+    return json.dumps(
+        {
+            "Dhcp4": {
+                "interfaces-config": {
+                    "interfaces": ["*"],
+                    "dhcp-socket-type": "udp",
+                },
+                "control-socket": {
+                    "socket-type": "unix",
+                    "socket-name": "/var/run/kea/kea4-ctrl-socket",
+                },
+                "lease-database": {
+                    "type": "memfile",
+                    "name": "/var/lib/kea/kea-leases4.csv",
+                    "lfc-interval": 3600,
+                },
+                "valid-lifetime": 3600,
+                "subnet4": [
+                    {
+                        "id": 1,
+                        "subnet": segment.cidr,
+                        "pools": [{"pool": segment.pool}],
+                        "relay": {"ip-addresses": [served.address]},
+                    }
+                ],
+            }
+        },
+        indent=2,
+    )
+
+
+def relay_conf_text(node: Node, spec: Spec) -> str:
+    """The dnsmasq config for a relay node.
+
+    Emitted as plain text for easy diffing.
+    """
+    served = _served_interface(node, spec)
+    server = _profile_node(node, spec, "server")
+
+    return (
+        "# Relay DHCP between the branch segment and the Kea server.\n"
+        "port=0\n"
+        f"dhcp-relay={served.address},{server.interfaces[0].address}\n"
+    )
 
 
 def load(path: str | Path) -> Spec:
@@ -252,7 +425,7 @@ def load(path: str | Path) -> Spec:
         for segment_raw in site_raw.get("segment", []):
             seg_where = f"{where} segment"
             _reject_unknown(segment_raw, SEGMENT_KEYS, seg_where)
-            _require(segment_raw, SEGMENT_KEYS, seg_where)
+            _require(segment_raw, {"name", "cidr"}, seg_where)
             name = str(segment_raw["name"])
             if name in segments:
                 raise ValueError(f"duplicate segment {name} in site {site_id}")
@@ -261,7 +434,9 @@ def load(path: str | Path) -> Spec:
                 raise ValueError(
                     f"segment {name} {cidr} is outside site {site_id} prefix {prefix}"
                 )
-            segments[name] = Segment(name=name, cidr=str(cidr))
+            pool_raw = segment_raw.get("pool")
+            pool = _parse_pool(str(pool_raw), cidr) if pool_raw is not None else None
+            segments[name] = Segment(name=name, cidr=str(cidr), pool=pool)
 
         sites[site_id] = Site(id=site_id, prefix=str(prefix), segments=segments)
 
@@ -310,7 +485,6 @@ def load(path: str | Path) -> Spec:
         site_id = str(node_raw["site"])
         if site_id not in sites:
             raise ValueError(f"{where} references unknown site: {site_id}")
-        site = sites[site_id]
 
         vcpus = int(node_raw["vcpus"])
         ram_mib = int(node_raw["ram_mib"])
@@ -318,40 +492,98 @@ def load(path: str | Path) -> Spec:
         if min(vcpus, ram_mib, disk_gib) < 1:
             raise ValueError(f"{where} has a non-positive size")
 
+        role = str(node_raw["role"])
+        if role not in ("dns", "dhcp", "client"):
+            raise ValueError(f"{where} role {role!r} is not dns, dhcp or client")
+
+        profile_raw = node_raw.get("profile")
+        profile = str(profile_raw) if profile_raw is not None else None
+        if role == "dhcp":
+            if profile is None:
+                raise ValueError(f"{where} profile is required for role {role!r}")
+        elif profile is not None:
+            raise ValueError(f"{where} profile is rejected for role {role!r}")
+
         interfaces: list[Interface] = []
         for iface_index, iface_raw in enumerate(node_raw.get("interface", []), start=1):
             iface_where = f"{where} interface #{iface_index}"
             _reject_unknown(iface_raw, IFACE_KEYS, iface_where)
-            _require(iface_raw, {"segment", "address", "gateway"}, iface_where)
 
             segment_name = str(iface_raw["segment"])
-            if segment_name not in site.segments:
-                raise ValueError(
-                    f"{iface_where} references unknown segment: {segment_name}"
-                )
-            segment = site.segments[segment_name]
+            segment_site, segment = _segment_in(sites, site_id, segment_name)
+            segment_cidr = ipaddress.IPv4Network(segment.cidr)
 
-            address = ipaddress.IPv4Address(str(iface_raw["address"]))
-            if address not in ipaddress.IPv4Network(segment.cidr):
-                raise ValueError(
-                    f"{iface_where} address {address} is outside {segment.cidr}"
-                )
+            mode = str(iface_raw.get("mode", "static"))
+            if mode not in ("static", "dhcp"):
+                raise ValueError(f"{iface_where} mode {mode!r} must be 'static' or 'dhcp'")
+            if iface_index == 1 and mode != "static":
+                raise ValueError(f"{where} requires a static first interface")
+            if mode == "dhcp" and role != "client":
+                raise ValueError(f"{iface_where} dhcp mode is client-only")
 
-            gateway = str(iface_raw["gateway"])
-            if ipaddress.IPv4Address(gateway) not in ipaddress.IPv4Network(segment.cidr):
-                raise ValueError(
-                    f"{iface_where} gateway {gateway} is outside {segment.cidr}"
-                )
+            if mode == "dhcp":
+                if "address" in iface_raw:
+                    raise ValueError(f"{iface_where} dhcp mode cannot declare an address")
+                if "gateway" in iface_raw:
+                    raise ValueError(f"{iface_where} dhcp mode cannot declare a gateway")
+                if "nameservers" in iface_raw:
+                    raise ValueError(f"{iface_where} dhcp mode cannot declare nameservers")
+                if "routes" in iface_raw:
+                    raise ValueError(f"{iface_where} dhcp mode cannot declare routes")
 
-            nameservers = [str(ns) for ns in iface_raw.get("nameservers", [])]
+                address = None
+                gateway = None
+                nameservers = []
+                routes = ()
+            else:
+                _require(iface_raw, {"address"}, iface_where)
+
+                address = ipaddress.IPv4Address(str(iface_raw["address"]))
+                if address not in segment_cidr:
+                    raise ValueError(
+                        f"{iface_where} address {address} is outside {segment_cidr}"
+                    )
+
+                gateway_raw = iface_raw.get("gateway")
+                gateway = None
+                if gateway_raw is not None:
+                    gateway = str(ipaddress.IPv4Address(str(gateway_raw)))
+                    if ipaddress.IPv4Address(gateway) not in segment_cidr:
+                        raise ValueError(
+                            f"{iface_where} gateway {gateway} is outside {segment_cidr}"
+                        )
+
+                nameservers = [str(ns) for ns in iface_raw.get("nameservers", [])]
+
+                routes = []
+                for route_index, route_raw in enumerate(iface_raw.get("routes", []), start=1):
+                    route_where = f"{iface_where} routes #{route_index}"
+                    _reject_unknown(route_raw, ROUTE_KEYS, route_where)
+                    _require(route_raw, ROUTE_KEYS, route_where)
+
+                    to_str = str(route_raw["to"])
+                    _net(to_str, route_where)
+
+                    via = str(ipaddress.IPv4Address(str(route_raw["via"])))
+                    if ipaddress.IPv4Address(via) not in segment_cidr:
+                        raise ValueError(
+                            f"{route_where} via {via} is outside {segment_cidr}"
+                        )
+
+                    routes.append(Route(to=to_str, via=via))
+                routes = tuple(routes)
+
             interfaces.append(
                 Interface(
                     scenario=scenario,
                     node=name,
                     segment=segment_name,
-                    address=str(address),
+                    address=str(address) if address else None,
                     gateway=gateway,
                     nameservers=nameservers,
+                    mode=mode,
+                    site=segment_site,
+                    routes=routes,
                 )
             )
 
@@ -377,6 +609,7 @@ def load(path: str | Path) -> Spec:
                 name=name,
                 site=site_id,
                 role=str(node_raw["role"]),
+                profile=profile,
                 vcpus=vcpus,
                 ram_mib=ram_mib,
                 disk_gib=disk_gib,
@@ -387,7 +620,49 @@ def load(path: str | Path) -> Spec:
             )
         )
 
+    for scenario_id in scenarios:
+        dhcp_nodes = [
+            n for n in nodes if n.scenario == scenario_id and n.role == "dhcp"
+        ]
+        servers = [n for n in dhcp_nodes if n.profile == "server"]
+        relays = [n for n in dhcp_nodes if n.profile == "relay"]
+        if len(servers) > 1:
+            raise ValueError(
+                f"scenario {scenario_id} has more than one dhcp server: "
+                f"{', '.join(n.name for n in servers)}"
+            )
+        if len(relays) > 1:
+            raise ValueError(
+                f"scenario {scenario_id} has more than one dhcp relay: "
+                f"{', '.join(n.name for n in relays)}"
+            )
+        if relays and not servers:
+            raise ValueError(f"scenario {scenario_id} has a dhcp relay but no server")
+
     by_name = {node.name: node for node in nodes}
+
+    for site_id, site in sites.items():
+        for segment_name, segment in site.segments.items():
+            if segment.pool is None:
+                continue
+            pool_start_raw, pool_end_raw = segment.pool.split(" - ")
+            pool_start = ipaddress.IPv4Address(pool_start_raw)
+            pool_end = ipaddress.IPv4Address(pool_end_raw)
+
+            for node in nodes:
+                for iface in node.interfaces:
+                    if iface.site != site_id or iface.segment != segment_name:
+                        continue
+                    if iface.mode != "static" or iface.address is None:
+                        continue
+                    address = ipaddress.IPv4Address(iface.address)
+                    if pool_start <= address <= pool_end:
+                        raise ValueError(
+                            f"pool {segment.pool!r} in segment {segment_name} "
+                            f"contains static address {iface.address!r} "
+                            f"from node {node.name}"
+                        )
+
     for node in nodes:
         if node.secondary is None:
             continue
@@ -493,8 +768,8 @@ def domain_xml(node: Node, spec: Spec, run_dir: Path | None = None) -> str:
     )
 
 
-def _prefix_for(node: Node, spec: Spec, segment_name: str) -> int:
-    cidr = spec.sites[node.site].segments[segment_name].cidr
+def _prefix_for(iface: Interface, spec: Spec) -> int:
+    cidr = spec.sites[iface.site].segments[iface.segment].cidr
     return ipaddress.IPv4Network(cidr).prefixlen
 
 
@@ -602,6 +877,14 @@ def managed_files(node: Node, spec: Spec) -> dict[str, str]:
     A secondary gets no zone: a shipped copy would carry the primary's serial,
     so BIND would keep it instead of transferring.
     """
+    if node.role == "dhcp":
+        if node.profile == "server":
+            return {"/etc/kea/kea-dhcp4.conf": kea_conf_text(node, spec)}
+        if node.profile == "relay":
+            return {
+                "/etc/ultus-corp/dhcp-relay.conf": relay_conf_text(node, spec)
+            }
+        return {}
     if node.role != "dns":
         return {}
     files = {
@@ -632,12 +915,22 @@ def node_identity(node: Node, spec: Spec) -> dict:
     It carries no per-site value the guest could render: the configuration it
     needs is already final in the seed.
     """
+    dhcp_interfaces = [
+        {
+            "segment": iface.segment,
+            "cidr": spec.sites[iface.site].segments[iface.segment].cidr,
+        }
+        for iface in node.interfaces
+        if iface.mode == "dhcp"
+    ]
     return {
         "name": node.name,
         "fqdn": _fqdn(node.name, spec),
         "role": node.role,
+        "profile": node.profile,
         "scenario": node.scenario,
         "primary": primary_of(node, spec) is None,
+        "dhcp_interfaces": dhcp_interfaces,
     }
 
 
@@ -664,17 +957,28 @@ def seed_files(
 
     ethernets = {}
     for index, iface in enumerate(node.interfaces):
-        prefix = _prefix_for(node, spec, iface.segment)
-        ethernets[f"eth{index}"] = {
-            # Predictable network names differ per bus and host, so match the
-            # deterministic MAC this renderer assigns instead of a device name.
-            "match": {"macaddress": interface_mac(node.scenario, node.name, iface.segment)},
+        # Predictable network names differ per bus and host, so match the
+        # deterministic MAC this renderer assigns instead of a device name.
+        match = {"macaddress": interface_mac(node.scenario, node.name, iface.segment)}
+        if iface.mode == "dhcp":
+            ethernets[f"eth{index}"] = {"match": match, "dhcp4": True}
+            continue
+
+        prefix = _prefix_for(iface, spec)
+        entry = {
+            "match": match,
             "addresses": [f"{iface.address}/{prefix}"],
-            # cloud-init 24.4 rejects `to: default` and then drops the whole
-            # config, so the default route is spelled as a prefix.
-            "routes": [{"to": "0.0.0.0/0", "via": iface.gateway}],
-            "nameservers": {"addresses": iface.nameservers},
         }
+        # cloud-init 24.4 rejects `to: default` and then drops the whole
+        # config, so the default route is spelled as a prefix.
+        routes = []
+        if iface.gateway is not None:
+            routes.append({"to": "0.0.0.0/0", "via": iface.gateway})
+        routes += [{"to": route.to, "via": route.via} for route in iface.routes]
+        if routes:
+            entry["routes"] = routes
+        entry["nameservers"] = {"addresses": iface.nameservers}
+        ethernets[f"eth{index}"] = entry
     network = {"version": 2, "ethernets": ethernets}
 
     write_files = [
@@ -763,11 +1067,9 @@ def main(argv: list[str]) -> int:
         for name, content in seed_files(node, spec).items():
             (seed_dir / name).write_text(content, encoding="utf-8")
 
-    site = spec.sites[nodes[0].site] if nodes else None
-    if site:
-        for segment in site.segments.values():
-            path = out / f"{args.scenario}-{segment.name}.network.xml"
-            path.write_text(network_xml(args.scenario, segment, spec), encoding="utf-8")
+    for segment in scenario_segments(spec, args.scenario):
+        path = out / f"{args.scenario}-{segment.name}.network.xml"
+        path.write_text(network_xml(args.scenario, segment, spec), encoding="utf-8")
 
     plan = {
         "scenario": args.scenario,
