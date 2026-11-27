@@ -42,8 +42,8 @@ python3 lab/measure.py bash tests/scenarios/s1-dns.sh
 (the guest footprint), and the peak RSS of the harness's own children. GNU time
 is not required. The numbers stay unset until that run. An estimate is not
 evidence. The deployment-contract change replaced the role image, so the cached
-disks on this host predate it and the next run needs one rootful disk build
-first.
+disks on this host predate it and the next s2 run needs a rootful disk build for
+`dhcp` and one for `client`.
 
 ## Deployment contract
 
