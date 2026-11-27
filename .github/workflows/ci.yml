@@ -132,7 +132,11 @@ jobs:
           test -n "$digest" || { echo "no registry digest for $image" >&2; exit 1; }
           echo "IMAGE=$image" >> "$GITHUB_ENV"
           echo "DIGEST=$digest" >> "$GITHUB_ENV"
-      - uses: aquasecurity/trivy-action@v0.36.0
+      # Actions track a moving ref on purpose. An action tag is tooling, not an
+      # artifact: a wrong exact tag breaks CI before any step runs, and adding
+      # one dependency should not need a version lookup. The base image digest
+      # and the package locks stay pinned because those are the artifact.
+      - uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE }}@${{ env.DIGEST }}
           exit-code: "1"

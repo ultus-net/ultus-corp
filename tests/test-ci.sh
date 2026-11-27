@@ -22,8 +22,9 @@ assert_ok "supply needs the build" grep_ci 'needs: build'
 assert_ok "trivy fails on a critical finding" grep_ci 'exit-code: "1"'
 assert_ok "trivy scans for critical findings" grep_ci 'severity: CRITICAL'
 # A tag that does not exist fails the job before any step runs, as 0.28.0 did.
-assert_ok "trivy is pinned to a release" \
-  bash -c "grep -qE 'aquasecurity/trivy-action@v?[0-9]+\\.[0-9]+\\.[0-9]+' '$ci'"
+# Actions track a moving ref, so this asserts the ref is floating, not exact.
+assert_ok "trivy tracks a moving action ref" \
+  bash -c "grep -qE 'aquasecurity/trivy-action@(master|v[0-9]+)$' '$ci'"
 assert_ok "the supply job authenticates before it scans" \
   bash -c "awk '/--authfile/{a=NR} /trivy-action/{t=NR} END{exit !(a && t && a < t)}' '$ci'"
 assert_ok "the signed digest comes from the pulled image" grep_ci 'RepoDigests'
