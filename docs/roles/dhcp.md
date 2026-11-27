@@ -72,3 +72,6 @@ at deployment and never converges afterwards.
 ```proof
 test -x /usr/libexec/ultus-corp/provision.sh && systemctl is-enabled ultus-provision.service && rpm -q kea dnsmasq
 ```
+
+Scenario proof: `tests/scenarios/s2-dhcp.sh` restarts Kea and the relay, and
+requires the same lease each time.

@@ -157,7 +157,7 @@ Rules that make the model hold:
 | --- | --- | --- | --- |
 | s0-base | 1 | 2 GiB | an image builds, boots, upgrades and rolls back |
 | s1-dns | 2 | 3 GiB | authoritative plus recursive, delegation intact |
-| s2-dhcp | 2 | 3 GiB | relay plus Kea, a lease survives a restart |
+| s2-dhcp | 3 | 3 GiB | relay plus Kea, a lease survives a restart |
 | s3-overlay | 4 | 8 GiB | hub and one branch edge, routes, nftables policy, the branch services, and the uplink-down case |
 | s4-pki | 2 | 3 GiB | root to intermediate to ACME leaf, trust without copying |
 | s5-identity | 4 | 9 GiB | FreeIPA, Keycloak federation, one OIDC app |
@@ -267,6 +267,7 @@ library, so the renderer needs no dependency at all.
 | D31 | Host policy | `/etc/containers/policy.json` defaults to reject, with one signed exception for the lab registry | Signing in CI proves nothing unless the host refuses unsigned pulls | Signing without host policy |
 | D32 | Role record | `docs/roles/<role>.md` with the Linux mechanism, the Windows analogy, where it breaks, and the proving command, gated in CI | The teaching claim becomes a checked artifact | Prose in the README |
 | D33 | Rendered service configuration | The lab renderer emits the final `named.conf`, `unbound.conf` and zone into the seed, from spec records. The image ships none, and the guest only applies them | Rule 2 has one meaning: a guest never renders a `lab` template, and no run's address is baked into a build | A build-time placeholder that the guest rewrites at boot |
+| D34 | DHCP relay mechanism | dnsmasq `--dhcp-relay` on the branch interface, Kea on the DC in s2, one `dhcp` role with `server` and `relay` profiles | s2 has no edge role yet, so the relay path is proven before s3 colocates Kea with the edge; the relay module is reused there | A second role per function; `dhcrelay`, which Stream 10 does not ship; relaying production DHCP to the DC, which D9 rejects |
 
 ## Configuration and deployment inputs
 
@@ -585,6 +586,11 @@ flowchart TB
 | Branch 1 | 10.11.0.0/16 | mgmt .10, usr .20, prt .30, guest .40, srv .50 |
 | Branch 2 | 10.12.0.0/16 | mgmt .10, usr .20, prt .30, guest .40, srv .50 |
 | Branch 3 | 10.13.0.0/16 | mgmt .10, usr .20, prt .30, guest .40, srv .50 |
+| Branch proof (s2) | 10.200.0.0/16 | lan .10 |
+
+The `Branch proof (s2)` block is the s2 proof site, not the design's Branch 1 at
+`10.11.0.0/16`: the branch edge does not exist yet, so s2 proves the relay
+without one.
 
 - Overlay: `10.255.0.0/16`. Hub `.0.1`, branch *n* `.n.1`.
 - AS 65000 at the hub, 65001 to 65003 at the branches.
@@ -675,8 +681,9 @@ out of scope, so no configuration profile is generated or validated.
 | Debuts in | Role | Image | Stateful? |
 | --- | --- | --- | --- |
 | s0 | dns | BIND 9 primary, Unbound at the DC | zone data at the primary |
-| s2 | dhcp | Kea, lease store | yes |
-| s3 | edge | FRR, nftables, WireGuard, DHCP relay, `hostapd`; `branch` profile adds a BIND secondary on `127.0.0.53:5353`, Unbound on the client-facing `:53`, Kea, chrony and a Caddy cache; `hub` profile adds the hub BGP | config only at the hub; rebuildable at the branch |
+| s2 | dhcp | Kea server and a dnsmasq relay, lease store | yes |
+| s2 | client | DHCP client, NetworkManager, no added package | no |
+| s3 | edge | FRR, nftables, WireGuard, DHCP relay, `hostapd`; `branch` profile adds a BIND secondary on `127.0.0.53:5353`, Unbound on the client-facing `:53`, Kea, chrony and a Caddy cache, and the `dhcp` role's relay module; `hub` profile adds the hub BGP | config only at the hub; rebuildable at the branch |
 | s3 | ntp | chrony | no |
 | s4 | pki | step-ca | yes, small |
 | s4 | proxy | Caddy, certmonger client | no |
@@ -722,7 +729,7 @@ versions of it.
 | --- | --- | --- |
 | s0-base | Repo skeleton, CI, one `dns` role, one VM | A lookup answers, then `lab down s0-base` leaves no domain, network or volume |
 | s1-dns | Authoritative plus recursive, delegation to the FreeIPA stub | A client resolves `dns-br1.lab.internal` and `ipa.lab.internal` through the pair |
-| s2-dhcp | Edge relay plus local Kea with a lease store | A client leases across the relay, and the lease survives a Kea restart |
+| s2-dhcp | Relay on the branch, Kea in the DC for s2, edge-local from s3 | A client leases across the relay, and the lease survives a Kea restart, a relay restart and a client reboot |
 | s3-overlay | Hub and one branch edge, WireGuard, nftables policy, hub-and-spoke routes, and the branch services | Before the cut, the branch secondary completes an AXFR of `lab.internal` and the proxy cache serves one object. Branch 1 then reaches DC subnets and cannot reach branch 2; with the uplink down, the edge answers DNS from the transferred zone, leases a new client, serves time and serves the cached object, and `ipa.lab.internal` fails cleanly after its TTL |
 | s4-pki | Offline root, step-ca intermediate, ACME issuance | A guest receives a leaf from step-ca and trusts it without a manual copy |
 | s5-identity | FreeIPA, Keycloak federation, one OIDC app | A FreeIPA user logs in to Gitea over OIDC, and no local account exists |
@@ -915,7 +922,8 @@ bug.
 | Stream 10 lifecycle | maintained until 2030-05-31 | centos.org release notes |
 | Modularity | removed in EL10. No modular content ships, so FreeIPA is a plain package | RHEL 10 considerations, software management |
 | FreeIPA | `ipa-server-dns 4.13.4-1.el10`, AppStream | Stream 10 package index |
-| Kea | `kea 2.6.3-1.el10`, BaseOS | mirror.stream.centos.org |
+| Kea | `kea 3.0.3-1.el10`, BaseOS | mirror.stream.centos.org |
+| dnsmasq | `dnsmasq 2.90-8.el10`, BaseOS | mirror.stream.centos.org |
 | FRR | `frr 10.6.1-3.el10`, AppStream | Stream 10 package index |
 | FreeRADIUS | `freeradius 3.2.8-2.el10`, AppStream | Stream 10 package index |
 | hostapd | `hostapd 2.11-2.el10`, AppStream, with a documented wired authenticator procedure | RHEL 10 configuring and managing networking, ch. 20 |

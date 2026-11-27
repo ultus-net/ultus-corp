@@ -51,3 +51,6 @@ automatically" setting, and NetworkManager is the DHCP Client service.
 ```proof
 test -x /etc/greenboot/check/required.d/50-client-health.sh && rpm -q NetworkManager && ! test -e /usr/libexec/ultus-corp/provision.sh
 ```
+
+Scenario proof: `tests/scenarios/s2-dhcp.sh` reboots this client and requires
+the same lease, then stops the relay and requires no lease.
