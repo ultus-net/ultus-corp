@@ -114,14 +114,21 @@ assert_ok "the client health check passes after the reboot" \
   guest "$client" /etc/greenboot/check/required.d/50-client-health.sh
 
 # Negative control: the relay is the only path to Kea. With it stopped, a
-# disconnect and reconnect drops the address and the client cannot get one back.
-# NetworkManager may retry with the cached lease, but it never assigns an address
-# without a server reply. If an address survives this step, the control is not
-# proving the relay path: stop and report it, never weaken the assertion.
+# disconnect and reconnect drops the address, and no address is observed during
+# the window. If one appears, the control is not proving the relay path: stop
+# and report it, never weaken the assertion.
 guest "$relay" 'systemctl stop ultus-dhcp-relay.service'
 renew "$dev"
-sleep 20
-assert_eq "no branch lease without the relay" "" "$(branch_addr)"
+surviving=
+for _ in $(seq 15); do
+  sleep 2
+  surviving=$(branch_addr 2>/dev/null || true)
+  if [ -n "$surviving" ]; then
+    echo "an address survived without the relay: $surviving" >&2
+    break
+  fi
+done
+assert_eq "no branch lease without the relay" "" "$surviving"
 guest "$relay" 'systemctl start ultus-dhcp-relay.service'
 renew "$dev"
 wait_branch_addr "$leased"
