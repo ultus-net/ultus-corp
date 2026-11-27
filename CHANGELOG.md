@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+- chore: merge the updated design from `main` and the delivery model from `docs/branch-footprint`, which `main` never received; the design now carries one sequence of decisions D1 to D33 and gates 1 to 16
 - feat: repository skeleton, evidence recorder and static gate ([Task 1](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md))
 - feat: pinned base, build argument and first role image ([Task 2](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md)); each gate now writes its own evidence file under `run/evidence/`
+- feat: core image split; `Containerfile.core` builds the shared layer from the pinned base and every role is `FROM` the core digest, so the common package set and `modules/base/` live in one place ([Task 2](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md))
 - feat: dns role with zone, boot provisioning and package lock ([Task 3](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md)); the lock excludes `gpg-pubkey` pseudo-packages, which are not installable
+- feat: the lab renders `named.conf`, `unbound.conf` and the zone from `lab/lab.toml`; the image ships none of them, and `provision.sh` applies what the seed delivered, deletes a stale secondary zone, restores SELinux labels and fails closed ([Task 3](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md))
 - feat: lab CLI with typed state and explicit teardown contract ([Task 5](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md)); the test substitutes a fake virsh and disk builder, so it runs on a host with no libvirt
 - feat: seed ISO, SSH key injection and image-builder wiring for s0-base ([Task 6](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md))
 - feat: the boot gate passes end to end: `s0-base` installs to disk, boots, resolves its own zone and answers a DNS query from the host, then tears down with no domain, network, volume or seed left (`run/evidence/s0-base.log`)

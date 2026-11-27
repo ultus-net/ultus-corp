@@ -4,11 +4,35 @@
 
 **Goal:** Build the repo skeleton, the scenario harness, and the first two runnable scenarios (`s0-base` and `s1-dns`) so every later role inherits a working build, boot, test and teardown cycle.
 
-**Architecture:** One `Containerfile.<role>` per role, all `FROM` one digest-pinned CentOS Stream 10 bootc base passed as a build argument. A stdlib-only Python renderer turns `lab/lab.toml` into libvirt network and domain XML plus a NoCloud seed ISO. A single `lab` CLI runs one scenario at a time, records everything it creates in a typed state file, and records what each assertion observed.
+**Architecture:** One `Containerfile.core` builds the shared layer from the digest-pinned CentOS Stream 10 bootc base. One `Containerfile.<role>` per role builds from the qualified core by digest. A stdlib-only Python renderer turns `lab/lab.toml` into libvirt network and domain XML, the final per-role configuration, and a NoCloud seed ISO. A single `lab` CLI runs one scenario at a time, records everything it creates in a typed state file, and records what each assertion observed.
 
 **Tech Stack:** CentOS Stream 10 image mode, bootc, Podman, image-builder, BIND 9, Unbound, libvirt/KVM, Python 3.11+ stdlib (`tomllib`, `dataclasses`, `ipaddress`), bash test harness.
 
 **Spec:** `docs/superpowers/specs/2026-11-26-ultus-corp-design.md`
+
+## Status, 2026-11-27
+
+Tasks 1 to 7 are built. The checkboxes below stay unchecked because they are the
+plan's step syntax, not its progress record. This table is the progress record.
+
+| Task | State | Evidence |
+| --- | --- | --- |
+| 1 skeleton, evidence, static gate | built | `run/evidence/static.log` |
+| 2 core image and first role | built | `run/evidence/image.log` |
+| 3 dns role, lock, health check | built | `run/evidence/packages.log`, `run/evidence/provision.log` |
+| 4 spec and renderer | built | `python3 -m unittest tests.test_render` |
+| 5 lab CLI and teardown | built | `run/evidence/lab.log` |
+| 6 s0-base boot | built | `run/evidence/s0-base.log` |
+| 7 s1-dns scenario | built, not yet booted | `tests/scenarios/s1-dns.sh` |
+| 8 deployment contract | next | - |
+| 9 CI and supply chain | planned | - |
+| 10 isolation, budgets, runbooks | planned | - |
+| 11 s1 evidence run | planned | - |
+
+Three things changed after the design was merged, and the task text below
+reflects them: the core image split (Task 2), the lab-rendered DNS configuration
+replacing the build-time placeholder (Tasks 3, 4 and 7), and the deployment
+contract moving into its own task ahead of CI (Task 8).
 
 ## Global Constraints
 
@@ -20,7 +44,8 @@
 - No libvirt network may forward to the host LAN. libvirt has no `isolated` forward mode, so a rendered network omits `<forward>` entirely, which is what makes it isolated. It carries no DHCP and no libvirt DNS.
 - Secrets never enter git, an image, or a rendered file inside the tree. `lab-secrets/` is gitignored, runtime material lives under `run/` with mode `0700`.
 - Renderer uses the Python standard library only. No PyYAML, no external YAML parser.
-- Every role `FROM` the base in `manifests/base.txt`, passed as `--build-arg BASE=…`.
+- `Containerfile.core` is `FROM` the base in `manifests/base.txt`, passed as `--build-arg BASE=…`. Every role is `FROM` the core digest recorded in `manifests/core.txt`, passed as `--build-arg CORE=…`.
+- The core owns `manifests/packages-common.txt` and its lock. A role manifest and lock carry only that role's additions.
 - `greenboot` is in the common manifest, and every role ships a required health check under `/etc/greenboot/check/required.d/`.
 - Every role carries `docs/roles/<role>.md` with four fields: Linux mechanism, closest Windows concept, where the analogy breaks, and the proving command.
 - Repo is public, MIT, generic. No client name and no real address.
@@ -296,23 +321,50 @@ Constraints. `build/manifest.sh` joins `manifests/packages-common.txt` with
 `build/common.sh`:
 
 ```bash
-base_ref() { head -1 manifests/base.txt; }
+base_ref() { head -n 1 manifests/base.txt; }
+core_image() { echo "localhost/ultus-corp/core:local"; }
 lab_image() { echo "localhost/ultus-corp/$1:local"; }
+
+# The core under test, written by build_core as <tag>@sha256:<id>.
+core_digest() {
+  local ref
+  ref=$(head -n 1 manifests/core.txt)
+  printf '%s\n' "${ref##*@}"
+}
+
+build_core() {
+  manifest core
+  podman pull -q "$(base_ref)" || return 1
+  podman build --build-arg BASE="$(base_ref)" -f Containerfile.core \
+    -t "$(core_image)" . || return 1
+  podman run --rm "$(core_image)" bootc container lint || return 1
+  printf '%s@sha256:%s\n' "$(core_image)" \
+    "$(podman image inspect --format '{{.Id}}' "$(core_image)")" > manifests/core.txt
+}
 
 build_role() {
   local role=$1
-  podman pull -q "$(base_ref)" || return 1
-  podman build --build-arg BASE="$(base_ref)" -f "Containerfile.$role" \
+  build_core || return 1
+  manifest "$role"
+  podman build --build-arg CORE="$(core_digest)" -f "Containerfile.$role" \
     -t "$(lab_image "$role")" . || return 1
   podman run --rm "$(lab_image "$role")" bootc container lint
 }
 ```
 
-`Containerfile.dns` starts with `ARG BASE`, then `FROM ${BASE}`, bind-mounts
-`build/out/install-<role>.txt` (the lock when one exists, the joined manifest
-otherwise), installs from it, cleans the dnf cache, copies `modules/base/` onto
-`/`, and runs `/usr/libexec/ultus-corp/build.d/` in name order. The lint runs
-from the build script so it runs on a cached build.
+`Containerfile.core` starts with `ARG BASE`, then `FROM ${BASE}`, bind-mounts
+`build/out/install-core.txt` (the common lock when one exists, the common
+manifest otherwise), installs from it, cleans the dnf cache, copies
+`modules/base/` onto `/`, and runs `00-base.sh`. `Containerfile.<role>` starts
+with `ARG CORE`, then `FROM ${CORE}`, and does the same with the role's own
+install list and `modules/<role>/`. A role image therefore carries only its
+additions. The lint runs inside `build_core` and `build_role`, so it runs on a
+cached build too.
+
+`build/package-lock.sh resolve core` writes the core lock from the core image.
+`build/package-lock.sh resolve <role>` writes the role's additions only, which is
+the role's package closure minus the core's. The filter on `rpm -qa` matters:
+it lists `gpg-pubkey` pseudo-packages that `dnf install` cannot resolve.
 
 `modules/` must exist before the first build, or the bind-mount has no source.
 Task 2 therefore creates
@@ -323,23 +375,17 @@ package ships it disabled, and a required check that never runs proves nothing.
 `COPY modules/base/ /` copies the tree's contents onto `/`. Task 3 adds
 `COPY modules/dns/ /` beside it.
 
-`build/package-lock.sh resolve <role>` builds the image, then writes
-`podman run --rm "$(lab_image "$role")" rpm -qa --qf '%{NAME}-%{EVR}.%{ARCH}\n' | grep -v '^gpg-pubkey-' | sort`
-to the lock file. The filter matters: `rpm -qa` lists `gpg-pubkey` pseudo-packages
-but `dnf install` cannot resolve them, so an unfiltered lock breaks the next
-build. When a lock exists, `Containerfile.<role>` installs `$(cat /tmp/packages.lock)`
-so the NEVRAs are pinned.
-
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `bash tests/test-image.sh dns`
-Expected: five `ok` lines including `renderer sees tomllib`, exit 0.
+Expected: six `ok` lines including `core image exists` and
+`renderer sees tomllib`, exit 0.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add manifests build Containerfile.dns tests/test-image.sh
-git commit -m "feat: pinned base, build argument and first role image"
+git add manifests build Containerfile.core Containerfile.dns tests/test-image.sh
+git commit -m "feat: core image, pinned base and first role layer"
 ```
 
 ---
@@ -351,8 +397,6 @@ git commit -m "feat: pinned base, build argument and first role image"
 - Modify: `Containerfile.dns` (add `COPY modules/dns/ /`)
 - Create: `modules/dns/usr/libexec/ultus-corp/build.d/50-dns.sh`
 - Create: `modules/dns/usr/libexec/ultus-corp/provision.sh`
-- Create: `modules/dns/etc/named.conf`, `modules/dns/etc/unbound/unbound.conf`
-- Create: `modules/dns/var/named/lab.internal.zone`
 - Create: `modules/dns/usr/lib/systemd/system/ultus-provision.service`
 - Create: `modules/dns/usr/lib/systemd/system/ultus-dns-ready.service`
 - Create: `modules/dns/etc/greenboot/check/required.d/50-dns-health.sh`
@@ -361,8 +405,8 @@ git commit -m "feat: pinned base, build argument and first role image"
 
 **Interfaces:**
 - Consumes: `build_role`, `lab_image`, `build/package-lock.sh` from Task 2.
-- Produces: a `dns` image whose node-specific config is rendered at boot from
-  `/run/ultus-corp/node.json`, and whose zone file already exists at build time.
+- Produces: a `dns` image that ships no service configuration and no zone, and
+  an applier that installs what the deployment delivers.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -385,9 +429,8 @@ run_role_proof() {
 
 assert_ok "bind installed"        podman run --rm "$img" rpm -q bind
 assert_ok "unbound installed"     podman run --rm "$img" rpm -q unbound
-assert_ok "zone file present"     podman run --rm "$img" test -s /var/named/lab.internal.zone
-assert_ok "named config valid"    podman run --rm "$img" named-checkconf -z /etc/named.conf
-assert_ok "unbound config valid"  podman run --rm "$img" unbound-checkconf /etc/unbound/unbound.conf
+assert_ok "no zone shipped"       podman run --rm "$img" bash -c '! test -e /var/named/lab.internal.zone'
+assert_ok "applier installed"     podman run --rm "$img" test -x /usr/libexec/ultus-corp/provision.sh
 assert_ok "provision unit enabled" podman run --rm "$img" systemctl is-enabled ultus-provision.service
 assert_ok "health check executable" \
   podman run --rm "$img" test -x /etc/greenboot/check/required.d/50-dns-health.sh
@@ -408,27 +451,20 @@ Expected: FAIL, `bind installed: package bind is not installed`.
 `50-dns.sh` runs `systemctl enable ultus-provision.service ultus-dns-ready.service`
 and asserts both are enabled, exiting non-zero with the unit name on failure.
 
-`lab.internal.zone` is created here, not in a later task: a primary with `SOA`,
-`NS`, and one placeholder `A` record for `dns-a` on `127.0.0.2`. The placeholder
-is what makes `named-checkconf -z` load the zone at build time, because `BIND`
-refuses an `NS` target with no address. `provision.sh` rewrites the owner name
-and the address to the booted node's own, so no run's address is baked into an
-image. `named.conf` serves the zone from `/var/named/lab.internal.zone` and
-forwards nothing. `unbound.conf` listens on loopback and forwards
-`lab.internal` to `127.0.0.2`. Both are the single-node default, valid at
-build time.
+No configuration ships in the image. `named.conf`, `unbound.conf` and the zone
+are rendered from `lab/lab.toml` by the renderer (Task 4) and delivered by the
+seed, so no run's address is baked into a build. `named.conf` binds the node's
+service address on `:53`, serves `lab.internal` from
+`/var/named/lab.internal.zone`, and forwards nothing. `unbound.conf` binds
+loopback on `:53` and forwards `lab.internal` to this node's own address. No
+address is held by both daemons.
 
-`provision.sh` reads `/run/ultus-corp/node.json` and specialises that default:
-it rewrites the listen address, the forwarder, and the zone's owner name and
-address. When the node carries a `secondary` field it writes a `type secondary`
-stanza with `masters` and `allow-transfer` instead of the primary stanza. It
-then runs `named-checkconf`. It is the only place node-specific configuration is
-produced, because build time cannot see the seed. The rewrite is idempotent.
-
-The owner-name rewrite matches the bare token `dns-a`, not a dotted FQDN. The
-`A` record owner is written without a trailing dot, so a `dns-a\.` pattern
-renames `SOA` and `NS` but leaves the `A` owner behind, and `named-checkconf -z`
-then rejects an `NS` target with no address.
+`provision.sh` applies what the seed delivered. It reads
+`/run/ultus-corp/node.json` for one fact, whether this node owns the zone. It
+fails closed when the seed delivered no configuration, deletes a zone file that
+an earlier deployment left on a secondary, restores the SELinux labels cloud-init
+cannot set, and runs both `named-checkconf` and `unbound-checkconf`. It never
+renders a `lab` template. The apply is idempotent.
 
 `50-dns.sh` enables `unbound.service` alongside the two ultus units. Nothing
 else pulls it, and the required check queries `127.0.0.1`, so an unenabled
@@ -438,14 +474,16 @@ resolver turns a healthy node into a failed boot.
 with `/etc/unbound` as its default chroot and its unit is `Type=notify`, so the
 daemon inside that chroot cannot open `/run/systemd/notify`. It then exits at
 startup with a fatal `sd_notify` error, while `unbound-checkconf` still reports
-the file as valid. `tests/test-packages.sh` therefore asserts the effective
-chroot through `unbound-checkconf -o chroot`, not only the syntax.
+the file as valid. `tests/test-provision.sh` therefore starts the rendered
+resolver and asserts its listener, not only the file's syntax.
 
 `ultus-provision.service` is `Type=oneshot`, `RemainAfterExit=yes`, ordered
-`Before=named.service`, and runs `provision.sh` as root.
+`Before=named.service` and `Before=unbound.service`, and runs `provision.sh` as
+root.
 
-`ultus-dns-ready.service` runs `named-checkconf -z` and is enabled, so a bad
-zone fails the boot visibly rather than inside a log.
+`ultus-dns-ready.service` runs `named-checkconf` without `-z` and is enabled. A
+secondary has no zone file until its transfer, so loading zones there would fail
+every secondary at boot. The required health check proves the zone answers.
 
 `50-dns-health.sh` queries `127.0.0.1` for `lab.internal SOA` and exits
 non-zero when the reply is not `NOERROR`. It reads the reply status, not the
@@ -670,11 +708,18 @@ dnsmasq and no DHCP.
 
 `seed_files` returns three strings. `meta-data` carries the scenario-scoped
 instance id and the FQDN. `user-data` is `#cloud-config` followed by
-`json.dumps` of a dict that writes `/run/ultus-corp/node.json` and enables
-`ultus-provision.service`; JSON is a valid YAML subset, so no YAML writer is
-needed. `network-config` is a version 2 dict rendered with `json.dumps`,
-carrying the static address, prefix, default route and nameservers per
-interface. The test parses both documents back with `json.loads`.
+`json.dumps` of a dict whose `write_files` carry the final `named.conf`,
+`unbound.conf`, the primary's zone and `/run/ultus-corp/node.json`; JSON is a
+valid YAML subset, so no YAML writer is needed. `network-config` is a version 2
+dict rendered with `json.dumps`, carrying the static address, prefix, default
+route and nameservers per interface. The test parses both documents back with
+`json.loads`.
+
+The configuration renderers are `zone_text`, `named_conf_text` and
+`unbound_conf_text`. `managed_files` collects them per node and
+`managed_manifest` hashes the exact bytes, so the expected checksums exist before
+the guest boots. `node_identity` carries the few facts the applier needs, and it
+is not a managed file.
 
 `lab/schema.md` documents every key, its type, its default and its rejection
 rule.
@@ -682,7 +727,7 @@ rule.
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python3 -m unittest tests.test_render -v`
-Expected: PASS, 12 tests.
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -971,9 +1016,8 @@ assert_ok "secondary answers without the primary" timeout 120 \
   bash -c "until dig +short +time=2 @${addr_b} dns-a.lab.internal | grep -qx ${addr_a}; do sleep 2; done"
 ```
 
-The assertion is the primary's address, not a shared name: the secondary's
-shipped copy is deleted at provisioning, so only a completed transfer can
-produce it.
+The assertion is the primary's address, not a shared name: a secondary never
+holds the zone locally, so only a completed transfer can produce it.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -985,18 +1029,17 @@ Expected: FAIL, `secondary answers the copied zone`, because no node carries
 
 `lab.toml` gains `secondary = "dns-a"` on `dns-b`. The renderer validates that
 the named node exists, sits in the same scenario, and is not itself a secondary.
-It then resolves the name to the primary's first interface address and writes it
-into `/run/ultus-corp/node.json` as `secondary`, because `masters { … }` needs an
-address. A node that others name receives `secondaries`, the addresses of those
-nodes.
+It then resolves the name to the primary's first interface address and writes the
+final `masters` stanza into the seed, because `masters { … }` needs an address. A
+node that others name receives `secondaries`, the addresses of those nodes, and
+renders them as `allow-transfer` and `also-notify`.
 
-`provision.sh` builds the whole zone stanza from the seed. A primary gets
-`allow-transfer` and `also-notify` for its secondaries. A secondary gets
-`masters` and `allow-transfer { none; }`, and its shipped zone file is deleted:
-the copy carries the master's serial, so BIND would serve it instead of
-transferring, and the stale records would outlive a transfer that never
-happened. The unbound forwarder is always this node's own address, because a
-secondary forwarding to its primary fails its own health check during a failover.
+`provision.sh` only applies what it was given. A primary's delivered zone is
+loaded and checked with `named-checkconf -z`. A secondary receives no zone, and
+the applier deletes any file an earlier deployment left, because the copy
+carries the master's serial and BIND would serve it instead of transferring. The
+unbound forwarder is always this node's own address, because a secondary
+forwarding to its primary fails its own health check during a failover.
 
 `ultus-dns-ready.service` drops `-z`. Loading the zones fails on a secondary
 before the transfer, and the health check already proves the zone answers.
@@ -1026,7 +1069,97 @@ git commit -m "feat: s1-dns primary, secondary and delegation"
 
 ---
 
-### Task 8: CI, supply chain, and the repin workflow
+### Task 8: The deployment contract, one record per deployment id
+
+**Files:**
+- Modify: `lab/render.py` (deployment id in `meta-data` and a seed file)
+- Create: `modules/base/usr/lib/systemd/system/ultus-role-install.target`
+- Create: `modules/base/usr/lib/systemd/system/ultus-deploy-finalize@.service`
+- Create: `modules/base/usr/lib/systemd/system/ultus-deploy-ready.target`
+- Create: `modules/base/usr/libexec/ultus-corp/finalize.sh`
+- Modify: `lab/lab` (deployment id per node, seed ejection, record copy)
+- Modify: `lab/state.py` (a `deployments` map keyed by id)
+- Create: `tests/test-deploy.sh`
+- Modify: `tests/scenarios/s1-dns.sh`
+- Modify: `CHANGELOG.md`
+
+**Interfaces:**
+- Consumes: `seed_files`, `managed_manifest` and the `lab` state schema.
+- Produces: gates 10 and 11. The guest holds one record per deployment id, the
+  seed is consumed once, and the expected managed-file manifest is compared on a
+  second boot.
+
+- [ ] **Step 1: Write the failing check**
+
+`tests/test-deploy.sh` asserts the image carries the three units and
+`finalize.sh`, that `ultus-provision.service` is ordered before
+`ultus-role-install.target`, and that `ultus-deploy-finalize@.service` carries
+`ConditionPathExists=!/var/lib/ultus-corp/deployments/%i.json`. It runs
+`finalize.sh` in the image with a fixture id and asserts the record's four keys:
+id, image digest, role, completion time. It runs it twice and asserts the second
+run writes nothing and exits zero. It feeds an id with a slash and asserts a
+non-zero exit and no file. Run it: `bash tests/test-deploy.sh` fails, no units.
+
+- [ ] **Step 2: Add the id and the units**
+
+`render.py` gains a `deployment_id` argument that defaults to a lowercase UUIDv4
+from `uuid.uuid4()`. `meta-data` carries it, and the seed writes
+`/run/ultus-corp/deployment-id`. `lab up` generates one id per node, so a second
+`lab up` of the same scenario is a new deployment. The test asserts the value
+matches `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`
+and that two calls differ.
+
+`ultus-role-install.target` ships in the core and is empty, so a role with no
+first-boot installer still orders cleanly. `ultus-provision.service` gains
+`Before=ultus-role-install.target`.
+
+`ultus-deploy-finalize@.service` is `Type=oneshot`, `RemainAfterExit=yes`,
+ordered `After=cloud-final.service ultus-role-install.target` and
+`Before=ultus-deploy-ready.target`. Its condition skips a second start for the
+same id. Its `[Install]` is `WantedBy=ultus-deploy-ready.target`, so cloud-init's
+`systemctl enable` gives the ready target the instance to pull in.
+
+`finalize.sh` validates the id against the same pattern before it writes
+anything. It writes `/var/lib/ultus-corp/deployments/<id>.json` with the id, the
+digest from `bootc status --json`, the role from `/run/ultus-corp/node.json` and
+the completion time. It then removes `/var/lib/cloud/instance` and
+`/var/lib/cloud/instances`, so cached user-data does not outlive the deployment.
+
+- [ ] **Step 3: Consume the seed and keep the record**
+
+`lab up` waits for the record with a bounded timeout through
+`ssh -i lab-secrets/id_ed25519 root@<address>`. It then ejects the seed from both
+the live and the persistent domain definition with
+`virsh change-media <domain> sda --eject --live --config`, deletes the ISO and
+the seed directory, and marks both resources consumed so teardown tolerates their
+absence. It copies the record into `run/<scenario>/state.json` under
+`deployments[<id>]`. A redeploy adds one entry and leaves the old one.
+
+- [ ] **Step 4: Prove the second boot**
+
+`tests/scenarios/s1-dns.sh` gains the gate 10 and 11 assertions. After readiness
+it runs `sha256sum -c` against the rendered manifest for each node, reboots the
+domain, waits for the health check, and runs the same comparison. It asserts the
+record count under `/var/lib/ultus-corp/deployments/` is one, and that
+`systemctl is-active ultus-deploy-finalize@<id>.service` is `active` with the
+unit not starting a second time. It hand-edits `/etc/named.conf` on the primary
+and asserts the comparison fails before restoring the file.
+
+- [ ] **Step 5: Run the checks**
+
+Run: `bash tests/test-deploy.sh` and `bash tests/test-static.sh`.
+Expected: both pass, and the static gate still accepts every role record.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add lab modules tests docs CHANGELOG.md
+git commit -m "feat: deployment record, seed consumption and managed-file gate"
+```
+
+---
+
+### Task 9: CI, supply chain, and the repin workflow
 
 **Files:**
 - Create: `.github/workflows/ci.yml`
@@ -1037,27 +1170,23 @@ git commit -m "feat: s1-dns primary, secondary and delegation"
 - Modify: `CHANGELOG.md`
 
 **Interfaces:**
-- Consumes: `tests/test-static.sh`, `tests/test-image.sh`, `tests/test-packages.sh`, `tests/test_render.py`, `tests/test-lab.sh`.
-- Produces: a CI gate that scans and signs the pushed digest of each role image, and a weekly digest bump PR that fails closed when the signer is unknown.
+- Consumes: `tests/test-static.sh`, `tests/test-image.sh`, `tests/test-packages.sh`, `tests/test_render.py`, `tests/test-lab.sh`, `tests/test-provision.sh`.
+- Produces: a CI gate that builds the core once, then each role from that digest, and scans and signs the pushed digest of each role image. A weekly digest bump PR fails closed when the signer is unknown.
 
 - [ ] **Step 1: Write the failing check**
 
-`tests/test-ci.sh` asserts `ci.yml` has a `build` job with
-`permissions: packages: write`, a `podman push` to `ghcr.io/ultus-net/`, a
-`supply` job with `needs: build`, and `cosign sign` naming a digest. It asserts
-`repin-base.yml` runs `cosign verify` with `--certificate-identity` and
-`--certificate-oidc-issuer` read from `manifests/base.signer`, and that a
-missing signer file fails the job. Run it: `bash tests/test-ci.sh` fails, no
-workflow file.
+`tests/test-ci.sh` asserts `ci.yml` has a `core` job that writes `manifests/core.txt` and a `build` job with `needs: core`, `permissions: packages: write`, a `podman push` to `ghcr.io/ultus-net/`, a `supply` job with `needs: build`, and `cosign sign` naming a digest. It asserts `repin-base.yml` runs `cosign verify` with `--certificate-identity` and `--certificate-oidc-issuer` read from `manifests/base.signer`, and that a missing signer file fails the job. Run it: `bash tests/test-ci.sh` fails, no workflow file.
 
 - [ ] **Step 2: Write the workflows**
 
-`ci.yml` jobs: `static`, `matrix` over `[dns]` for build plus
-`tests/test-packages.sh`, `render` on Python 3.12, `lab` with a fake virsh, and
-`supply` which pulls the pushed digest, runs `trivy image --exit-code 1
---severity CRITICAL`, writes the SBOM with `syft`, and signs that digest with
-`cosign` keyless. The scan and the signature name the same digest, so the
-artifact that was scanned is the artifact that was signed.
+`ci.yml` jobs: `static`, `core` which builds the core and uploads
+`manifests/core.txt` as an artifact, `matrix` over `[dns]` with `needs: core`
+for the role build plus `tests/test-packages.sh` and `tests/test-provision.sh`,
+`render` on Python 3.12, `lab` with a fake virsh, and `supply` which pulls the
+pushed digest, runs `trivy image --exit-code 1 --severity CRITICAL`, writes the
+SBOM with `syft`, and signs that digest with `cosign` keyless. The scan and the
+signature name the same digest, so the artifact that was scanned is the artifact
+that was signed.
 
 `repin-base.yml` runs weekly, resolves the `stream10` tag to a digest, runs
 `cosign verify` against it with the exact issuer and identity in
@@ -1078,7 +1207,7 @@ git commit -m "feat: CI gates, digest-scoped signing and verified repin"
 
 ---
 
-### Task 9: Isolation gate, budgets, runbooks, and the phase close
+### Task 10: Isolation gate, budgets, runbooks, and the phase close
 
 **Files:**
 - Create: `tests/test-isolation.sh`
@@ -1120,7 +1249,8 @@ interface, so the comparison cannot flag the lab's own networks.
 fixtures:
 
 ```bash
-assert_ok "real base pin"       check_base_pin manifests/base.txt Containerfile.*
+assert_ok "real core pin"       check_base_pin manifests/base.txt Containerfile.core
+assert_ok "real role pin"       check_role_froms_core Containerfile.*
 assert_ok "real manifests"      check_manifest_one_per_line manifests/packages-*.txt
 assert_ok "real tree secrets"   check_no_secret_patterns .
 assert_ok "real role records"   check_role_records docs/roles
@@ -1138,7 +1268,7 @@ exists and what to check before publishing.
 - [ ] **Step 4: Run the full gate set**
 
 Run:
-`bash tests/test-static.sh && bash tests/test-image.sh dns && bash tests/test-packages.sh && python3 -m unittest tests.test_render -v && bash tests/test-lab.sh && bash tests/test-ci.sh && bash tests/test-isolation.sh`
+`bash tests/test-static.sh && bash tests/test-image.sh dns && bash tests/test-packages.sh && bash tests/test-provision.sh && bash tests/test-deploy.sh && python3 -m unittest tests.test_render -v && bash tests/test-lab.sh && bash tests/test-ci.sh && bash tests/test-isolation.sh`
 
 Expected: every gate passes, and the command line is recorded in
 `docs/runbooks/scenarios.md` as the P0 acceptance line.
@@ -1152,16 +1282,56 @@ git commit -m "feat: isolation gate, budget checks and P0 runbooks"
 
 ---
 
+### Task 11: Run `s1-dns` end to end and record the evidence
+
+**Files:**
+- Modify: `docs/runbooks/scenarios.md`, `README.md`
+- Modify: `CHANGELOG.md`
+
+**Interfaces:**
+- Consumes: every gate from Tasks 1 to 10.
+- Produces: gates 4 and 5 proved on a real hypervisor, with the observed values
+  in `run/evidence/s1-dns.log`.
+
+- [ ] **Step 1: Build the disk once, as the operator**
+
+Run: `LAB_PODMAN='sudo podman' bash lab/build-disk.sh dns build/vm/dns.qcow2`.
+Expected: one cached disk whose `<disk>.id` sidecar matches the current dns
+image id. The agent cannot run this step, because it needs root.
+
+- [ ] **Step 2: Run the scenario**
+
+Run: `bash tests/scenarios/s1-dns.sh`.
+Expected: every assertion records its command, its expected value and the
+observed value, and `lab down s1-dns` leaves no domain, no network and no seed.
+The primary answers its own record, the secondary answers the copied zone and
+still answers with the primary suspended.
+
+- [ ] **Step 3: Record the numbers**
+
+`docs/runbooks/scenarios.md` gains the measured wall time, the peak RSS and the
+RAM total for `s1-dns`, beside the `s0-base` figures. The README's status line
+names the scenarios that pass on this host, and the ones that are still planned.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add docs README.md CHANGELOG.md
+git commit -m "docs: s1-dns evidence and the P0 acceptance line"
+```
+
+---
+
 ## Self-Review
 
 **Spec coverage.** P0 and s0-base come from the design's Scenarios table. The
-static, build, image, scenario, teardown, supply-chain and isolation gates are
-Tasks 1, 2, 3, 6, 5, 8 and 9. The scenario model's six rules are covered by
-Tasks 4, 5, 6 and 9: budgets and measured footprint in Task 9, symmetric
-teardown in Task 5. The Audience rule is executable through the evidence
-recorder (Task 1), the role record (Tasks 1 and 3), and the runbook columns
-(Tasks 6 and 9). The update gate is seeded in P0 by `greenboot` and the health
-check, and proved in s11.
+static, build, image, scenario, teardown, supply-chain, isolation, managed-file
+and deployment gates are Tasks 1, 2, 3, 6, 5, 9, 10, 8 and 8. The scenario
+model's six rules are covered by Tasks 4, 5, 6 and 10: budgets and measured
+footprint in Task 10, symmetric teardown in Task 5. The Audience rule is
+executable through the evidence recorder (Task 1), the role record (Tasks 1 and
+3), and the runbook columns (Tasks 6 and 10). The update gate is seeded in P0 by
+`greenboot` and the health check, and proved by gate 15 in a later plan.
 
 **Step scan.** Every step names a file, a command and an expected result. The
 renderer step states the MAC derivation, the isolated-network rule and the seed
@@ -1169,19 +1339,20 @@ schema because a signature cannot carry them. The teardown step states the
 failure contract because a passing test cannot.
 
 **Type consistency.** `load`, `nodes_for`, `network_xml`, `domain_xml`,
-`interface_mac` and `seed_files` keep one signature across Tasks 4, 5 and 6.
-`build_role`, `base_ref` and `lab_image` keep one signature across Tasks 2, 3
-and 6. The state schema is stated once in Task 5 and consumed verbatim in
-Tasks 6 and 7. The domain name contract `ultus-<scenario>-<node>` is stated
-once in Task 4 and reused in Tasks 5, 6, 7 and 9.
+`interface_mac`, `managed_files` and `seed_files` keep one signature across
+Tasks 4, 5, 6 and 8. `build_core`, `build_role`, `core_digest`, `base_ref` and
+`lab_image` keep one signature across Tasks 2, 3 and 6. The state schema is
+stated once in Task 5 and consumed verbatim in Tasks 6, 7 and 8. The domain name
+contract `ultus-<scenario>-<node>` is stated once in Task 4 and reused in Tasks
+5, 6, 7 and 10.
 
-**Review Focus.** Eight risks, each with a test: partial state and failed
-cleanup (Task 5), name collision (Tasks 4 and 5), host overlap (Task 9),
-package drift (Tasks 2 and 3), libvirt dnsmasq (Tasks 4, 6 and 9), stale seed
-(Tasks 4, 5 and 6), silent green (Task 1), and a vacuous isolation gate
-(Task 9).
+**Review Focus.** Nine risks, each with a test: partial state and failed
+cleanup (Task 5), name collision (Tasks 4 and 5), host overlap (Task 10),
+package drift (Tasks 2, 3 and 9), libvirt dnsmasq (Tasks 4, 6 and 10), stale seed
+(Tasks 4, 5, 6 and 8), silent green (Task 1), a vacuous isolation gate (Task 10),
+and a role image that quietly rebuilds the core (Task 9).
 
-**Proportion.** Nine tasks for two scenarios plus the harness. The code blocks
+**Proportion.** Eleven tasks for two scenarios plus the harness. The code blocks
 are fixtures, assertions and one build invocation, not implementation bodies.
 
 ## Plan sequence after this one
@@ -1193,4 +1364,5 @@ are fixtures, assertions and one build invocation, not implementation bodies.
 | 3 | s4, s5 | Trust and identity |
 | 4 | s6, s9 | 802.1X and endpoint onboarding |
 | 5 | s7, s8 | Delivery and observability |
-| 6 | s10, s11, assembly | Stateful roles, the update gate, then the assembly checks |
+| 6 | s10, assembly | Stateful roles, then the assembly checks |
+| 7 | upgrade | Gate 15, the rollback path and the update plane |

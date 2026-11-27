@@ -1,11 +1,12 @@
 # ultus-corp: a reference corporate network lab
 
-**Status:** draft for approval, 2026-11-26
-**Scope:** a three-branch company with a data-centre hub, built from CentOS
-Stream 10 bootc images and run as libvirt VMs. It starts with one service and
-its zone, then adds the directory, the IdP, endpoint management and the stateful
-roles a corporate network actually needs. Every component is designed and tested
-as its own bounded scenario, and the full topology is never resident.
+**Status:** draft for approval, 2026-11-26, revised 2026-11-27
+**Scope:** a three-branch company with a primary data centre, a disaster-recovery
+data centre and a hub, built from CentOS Stream 10 bootc images and run as
+libvirt VMs. It starts with one service and its zone, then adds the directory,
+the IdP, endpoint management and the stateful roles a corporate network actually
+needs. Every component is designed and tested as its own bounded scenario, and
+the full topology is never resident.
 **Relationship:** independent of `infra-overhaul`. It may later supply images,
 patterns and evidence to that project. It inherits no client data, addresses,
 secrets or vendor contracts.
@@ -37,11 +38,14 @@ document.
 - The lab is judged on whether it teaches the mechanism, not on whether it
   runs. A green test that hides why it passed is a failure here.
 
-The shape is a central control plane and a local data plane. The data centre
-owns identity, policy, configuration, endpoint management and the artifact
-registry. Each branch runs its own DNS, DHCP, NTP and proxy so the LAN survives
-a WAN loss. A WireGuard overlay is only the transport between them, and a new
-branch is one spec entry and one address block, never a code change.
+The shape is a central control plane and a local data plane. The primary data
+centre owns identity, policy, configuration, endpoint management and the
+artifact registry. Each branch runs its own DNS, DHCP, NTP and proxy so the LAN
+survives a WAN loss. The DR data centre runs the same role images as a standby
+hub, so losing the primary data centre costs the branches their central services
+but not their local ones. A WireGuard overlay is only the transport between
+them, and a new branch is one spec entry and one address block, never a code
+change.
 
 The design is complete. The lab is not. Every component below is also a
 scenario: a bounded set of VMs, a spec entry, a test and a measured footprint.
@@ -57,8 +61,9 @@ assembly checks with a dated evidence file, not the normal mode.
   isolation, with its footprint measured and recorded.
 - Components that carry to a real rebuild: image, config template and test
   travel; the trust root, names and keys are reissued.
-- Three branches plus a data-centre hub, connected hub-and-spoke, that exercises
-  DHCP relay, split-horizon DNS, cross-branch routing and an active/active pair.
+- Three branches plus a primary and a DR data centre, connected hub-and-spoke,
+  that exercises DHCP relay, split-horizon DNS, cross-branch routing and an
+  active/active pair.
 - A branch that keeps resolving, leasing and telling time when its overlay link
   is cut.
 - A real identity stack: FreeIPA as the source of truth, Keycloak federated to
@@ -66,6 +71,9 @@ assembly checks with a dated evidence file, not the normal mode.
 - Endpoint onboarding end to end: PXE to an installer, certificate trust,
   802.1X and app SSO, driven from one management plane.
 - Every scenario rebuildable from the repository, from an empty host.
+- Generated artifacts have a budget: role images, builder output and base disks
+  share 20 GiB. `lab prune` reclaims them and refuses to remove a file a running
+  domain has open.
 - Fully isolated: its own address plan and trust root, no route into the real
   estate or the personal tailnet.
 - Publishable: no client name, no real address, no secret, no exported zone.
@@ -135,8 +143,8 @@ Rules that make the model hold:
 
 1. A scenario declares only the dependencies it needs, never everything for
    safety.
-2. A single scenario stays under five VMs and 10 GiB of RAM. The assembly runs
-   are exempt and are listed separately.
+2. A single scenario uses fewer than five VMs and at most 10 GiB of RAM. The
+   assembly runs are exempt and are listed separately.
 3. `up` and `down` are symmetric. `down` leaves no domain, network, volume or
    generated key, and a second `up` succeeds.
 4. A scenario rebuilds from an empty host in under ten minutes once its role
@@ -157,7 +165,7 @@ Rules that make the model hold:
 | s7-delivery | 3 | 6 GiB | registry mirror, egress toggle, pull through the hub |
 | s8-observe | 2 | 5 GiB | metrics, logs and a secret rotation without a rebuild |
 | s9-endpoints | 3 | 10 GiB | PXE to an installer, Fleet enrolment, Windows certificate trust |
-| s10-stateful | 3 | 9 GiB | print, file, IPAM, backup and restore |
+| s10-stateful | 4 | 10 GiB | print across a node loss, file, IPAM, backup and restore |
 
 | Assembly run | VMs | RAM | Proves |
 | --- | --- | --- | --- |
@@ -228,7 +236,7 @@ library, so the renderer needs no dependency at all.
 | --- | --- | --- | --- | --- |
 | D1 | Base | CentOS Stream 10 image mode, bootc, Podman Quadlet | EL parity, roughly five-year support, atomic upgrade and rollback | Fedora, which moves every six months; Ubuntu and Debian, which have no atomic rollback |
 | D2 | Repository | Fresh tree, one `Containerfile.<role>` per role | The role pattern is proven in `dux-atomic`; the Fedora pin and desktop half are not | Forking `dux-atomic` |
-| D3 | Topology | Three branches plus a DC hub, hub-and-spoke WireGuard | The smallest shape that shows central control with local survival | Two sites, which cannot show a flexible branch count; full mesh now |
+| D3 | Topology | Three branches, a primary DC hub and a DR DC, hub-and-spoke WireGuard | Mirrors the estate the operator has run: a data centre with DR and branches hanging off it, and it is the smallest shape that shows central control with local survival | Two sites, which cannot show a flexible branch count; full mesh now |
 | D4 | Platform | libvirt/KVM, TOML spec, `lab` renderer | Deterministic, cheap to rebuild, and parseable with the Python standard library | OpenTofu/libvirt first; Proxmox; a YAML spec with a parser dependency |
 | D5 | Isolation | Dedicated libvirt networks, no forward to the host LAN, own address plan | Safe to publish and safe to break | Bridging to the home LAN; tailnet reachability |
 | D6 | Identity | FreeIPA source of truth; Keycloak federates over LDAP; FreeRADIUS uses FreeIPA certs | One authority, AD plus Entra shape | Two stores; directory only |
@@ -236,12 +244,12 @@ library, so the renderer needs no dependency at all.
 | D8 | DNS | BIND 9 primary in the DC; Unbound recursive per site; FreeIPA owns `ipa.lab.internal` | LAN resolution survives identity and the WAN being down | FreeIPA as the only DNS; dnsmasq |
 | D9 | DHCP | Kea local to each branch, configured from the DC spec | Leases survive a WAN cut, and the branch stays a self-contained unit | DHCP relayed to the DC; DHCP on the directory |
 | D10 | Edge | One bootc role with `branch` and `hub` profiles: FRR, nftables, WireGuard, DHCP relay. The `branch` profile also runs a BIND secondary, Unbound, Kea, chrony and a Caddy cache; the `hub` profile runs the hub BGP | The image thesis covers the network, not only the services | OPNsense appliances; host bridges only |
-| D11 | Provisioning | `bootc-image-builder` qcow2 plus a NoCloud seed ISO | The path `dux-atomic` already proves | Hand-built guests; cloud images |
+| D11 | Provisioning | `image-builder` qcow2 plus a NoCloud seed ISO | The maintained interface, with an explicit blueprint instead of an implicit config path | The legacy `bootc-image-builder` CLI; hand-built guests; cloud images |
 | D12 | Secrets | Generated once into a gitignored `lab-secrets/`; root key offline | Nothing sensitive enters git or an image | Committed keys; secrets baked into images |
 | D13 | Supply chain | cosign keyless per image, SBOM per image, trivy gate | Same gates as `dux-atomic` | Unsigned local builds |
 | D14 | Lab unit | One scenario per component, run and torn down alone | The design is complete while the resident footprint is one bounded component, so it fits hardware on hand and costs nothing | A resident topology; graduated `--profile` sets |
 | D15 | Licence and visibility | Public, MIT, generic | A reference design should be readable | Private; AGPL |
-| D16 | Overlay growth | BGP over the tunnels is the first scaling step, then direct paths, then a second hub | FRR already ships in the edge image, so growth is config, not a redesign | Hand-editing a full mesh |
+| D16 | Overlay growth | BGP over the tunnels is the first scaling step, then direct paths, then the DR hub | FRR already ships in the edge image, so growth is config, not a redesign | Hand-editing a full mesh |
 | D17 | Endpoint management | Fleet for inventory and policy, PXE for Linux and WinPE. No workstation MDM | One inventory and onboarding plane, without an Apple or Entra dependency | Intune, which needs Entra; an MDM stack, which needs APNs or Autopilot; client VMs only, which leaves onboarding manual |
 | D18 | 802.1X authenticator | `hostapd` with the wired driver on the users bridge | Gives real supplicants a real authenticator, not just `eapol_test` | `eapol_test` only, which proves the server and nothing else |
 | D19 | Integration evidence | A static interface-composition check plus a dated assembly run | Composition is checked continuously where it can be, and sampled where it cannot | Assuming a green scenario proves the network |
@@ -255,6 +263,10 @@ library, so the renderer needs no dependency at all.
 | D27 | Health and routing | The on-host probe has bounded timeouts, absence is failure, and each assertion is retryable or terminal. Failure order is recover, park, notify, and a threshold, timeout or recovery failure halts the waves | A green boot is not a working host, and silence is not success | Port-open checks; first-boot success |
 | D28 | Dead-man and evidence | Two switches: no successful qualification in N days, and a silent watcher for 24 hours. Retain per-release evidence and a notification payload with a local reproducer | Every other alert fires on failure; these fire on silence, and later triage needs the release fields | Alerting only on failure; guest-only evidence |
 | D29 | Prohibitions | Automation may not skip a gate, force-promote, rebase a channel, or delete the previous deployment. Break-glass is documented and logged | An unattended loop is only safe when the safe actions are the only ones available | Undocumented overrides |
+| D30 | Update health gate | `greenboot` health checks in `/etc/greenboot/check/required.d`, one script per role | A failed upgrade reboots back to the previous image without a human at 03:00 | Trusting every promoted image |
+| D31 | Host policy | `/etc/containers/policy.json` defaults to reject, with one signed exception for the lab registry | Signing in CI proves nothing unless the host refuses unsigned pulls | Signing without host policy |
+| D32 | Role record | `docs/roles/<role>.md` with the Linux mechanism, the Windows analogy, where it breaks, and the proving command, gated in CI | The teaching claim becomes a checked artifact | Prose in the README |
+| D33 | Rendered service configuration | The lab renderer emits the final `named.conf`, `unbound.conf` and zone into the seed, from spec records. The image ships none, and the guest only applies them | Rule 2 has one meaning: a guest never renders a `lab` template, and no run's address is baked into a build | A build-time placeholder that the guest rewrites at boot |
 
 ## Configuration and deployment inputs
 
@@ -540,6 +552,9 @@ flowchart TB
     MON[monitoring]
     AUX["git, secrets<br/>Fleet, PXE"]
   end
+  subgraph dr["DR DC, 10.101.0.0/16, stage 3"]
+    DRH[hub-dr]
+  end
   subgraph b1["Branch 1, 10.11.0.0/16"]
     E1["edge-1<br/>overlay + local DNS, DHCP, NTP, proxy"]
     C1["Linux + Windows clients"]
@@ -557,6 +572,7 @@ flowchart TB
   HUB --- REG
   HUB --- MON
   HUB --- AUX
+  HUB -. standby hub .-> DRH
   C1 -->|PXE and inventory| AUX
 ```
 
@@ -565,6 +581,7 @@ flowchart TB
 | Site | Prefix | Segments |
 | --- | --- | --- |
 | DC | 10.100.0.0/16 | mgmt .10, srv .20, dmz .30 |
+| DR DC | 10.101.0.0/16 | mgmt .10, srv .20, dmz .30 |
 | Branch 1 | 10.11.0.0/16 | mgmt .10, usr .20, prt .30, guest .40, srv .50 |
 | Branch 2 | 10.12.0.0/16 | mgmt .10, usr .20, prt .30, guest .40, srv .50 |
 | Branch 3 | 10.13.0.0/16 | mgmt .10, usr .20, prt .30, guest .40, srv .50 |
@@ -575,6 +592,12 @@ flowchart TB
 - Hostnames carry the site: `dns-br1.lab.internal`, `hub-dc.lab.internal`.
 - The overlay space is separate from every site prefix, so a leaked route is
   obvious.
+
+The DR DC runs the DC column from the same role images, in standby. It is not a
+second code path: the only difference is which hub on the overlay is active, and
+that is spec and key state, not an image. Evolution stage 3 makes it live. It is
+excluded from the `full` count, which covers the primary data centre and the
+three branches.
 
 ## Service placement
 
@@ -627,6 +650,11 @@ expires during a cut. That failure is the declared identity behaviour, not a
 fault. External names also fail during a cut; only the local zones are
 guaranteed, because that is all the secondary holds.
 
+A node that runs both roles takes its service address for BIND and loopback for
+Unbound, which is one address each. The management binding is for a hub where the
+primary is a different host, so the table never asks one address to carry two
+daemons.
+
 ## Endpoint coverage
 
 | Capability | Linux | Windows | macOS |
@@ -668,11 +696,25 @@ A role debuts in the scenario that first needs it, and later scenarios reuse the
 same image. The image is the unit of build and test. The scenario is the unit of
 run.
 
-Each image is `FROM` the pinned `quay.io/centos-bootc/centos-bootc:stream10`
-digest, installs `manifests/packages-common.txt` plus its own manifest, and
-copies `modules/<role>/` onto `/`. A role's build-time steps live under
-`/usr/libexec/ultus-corp/build.d/`, run in name order, and assert their own
-enablement.
+Every image is built in two layers. `Containerfile.core` is `FROM` the pinned
+`quay.io/centos-bootc/centos-bootc:stream10` digest, installs
+`manifests/packages-common.txt` with its lock, and copies `modules/base/` onto
+`/`. That is `localhost/ultus-corp/core`, and it is the only image that names
+the upstream base.
+
+Each role image is `FROM` that core by digest, installs only its own manifest
+and lock, and copies `modules/<role>/` onto `/`. A role's build-time steps live
+under `/usr/libexec/ultus-corp/build.d/`, run in name order, and assert their own
+enablement. `manifests/core.txt` records the qualified core as
+`<repository>:<tag>@sha256:<digest>`, and it is an artifact of the core build,
+never a hand-edited pin. The static gate holds `Containerfile.core` to the pinned
+base and every role to the core digest, so a role that names the upstream base
+fails before it builds.
+
+The split keeps the shared layer in one place. A common package change rebuilds
+the core and every role, and a role change rebuilds one role. A common package
+is declared once, in the core manifest, so two roles cannot drift to different
+versions of it.
 
 ## Scenarios and exit criteria
 
@@ -703,7 +745,7 @@ tunnels is the first move that scales.
 | 0 | Hub-and-spoke, static WireGuard `AllowedIPs` | now | one peer per branch on the hub |
 | 1 | BGP over the tunnels, hub as route reflector | a second branch, or any change that touches every node | edge config only |
 | 2 | Direct spoke-to-spoke for selected pairs | a branch-to-branch workload that cannot take the hairpin | one extra peer and a more specific route |
-| 3 | A second hub, BGP multipath | hub downtime becomes unacceptable | two hub profiles, every branch peers with both |
+| 3 | The DR DC becomes a live hub, BGP multipath | DR is a stated requirement, so a hub loss must not take the branches offline | two hub profiles, every branch peers with both |
 | 4 | Local internet breakout at large branches | SaaS latency or DC egress cost | policy routing per prefix, the hub stops being the only egress |
 | 5 | A control plane for keys and routes (Headscale, NetBird) | more branches than hand-managed keys carry, or short-lived keys required | overlay identity tied to FreeIPA |
 
@@ -753,12 +795,16 @@ a deliberate, visible set of new secrets.
 ## Repository layout
 
 ```
-Containerfile.<role>            one per role
-manifests/packages-common.txt   shared set
-manifests/packages-<role>.txt   role set
-manifests/*.lock                generated third-party pins
+Containerfile.core                the shared layer, FROM the pinned base
+Containerfile.<role>              one per role, FROM the core digest
+manifests/base.txt                the pinned upstream base
+manifests/core.txt                the qualified core, written by its build
+manifests/packages-common.txt     shared set, owned by the core
+manifests/packages-<role>.txt     role additions
+manifests/*.lock                  generated third-party pins
 build/                          common.sh, manifest.sh, package-lock.sh
-modules/<role>/                 files copied onto /
+modules/base/                   the shared files, copied into the core
+modules/<role>/                 role files copied onto /
 overlay/                        files every role gets
 lab/                            lab.toml, renderer, scenarios, seeds
 release/                        per-role release manifest
@@ -771,25 +817,37 @@ docs/                           design, plans, runbooks
 ## Gates
 
 1. Static: base pin by tag and digest, one package per manifest line, no secret
-   pattern in the tree, every role `FROM` the pinned base, no installation
-   media committed.
-2. Build: each role image builds in a CI matrix.
-3. Image: `bootc container lint`, role units enabled, package lock matches.
-4. Scenario: `lab up <scenario>` boots it and its own test passes.
+   pattern in the tree, `Containerfile.core` `FROM` the pinned base, every role
+   `FROM` the core digest, no installation media committed.
+2. Build: the core builds once, then each role image builds in a CI matrix from
+   that exact core digest.
+3. Image: `bootc container lint`, role units enabled, the core lock matches the
+   core image and each role lock matches what the role adds.
+4. Scenario: `lab up <scenario>` boots it and its own test passes, with each
+   assertion recording the command, the expected value and the observed value in
+   `run/evidence/<scenario>.log`. A green line without an observation is not
+   evidence.
 5. Teardown: `lab down <scenario>` leaves no domain, network, volume or
-   generated key, and a second `up` of the same scenario succeeds.
+   generated key, and a second `up` of the same scenario succeeds. A cleanup
+   that cannot finish keeps its state file and fails loudly for human review.
 6. Interface: every cross-scenario dependency is declared, and the static check
    confirms the declarations compose.
 7. Assembly: the add-a-branch and branch-survival tests, run as
    `assembly-branches` and recorded with a date.
 8. Supply chain: trivy, SBOM, cosign keyless.
-9. Isolation: a test asserts no libvirt network forwards to the host LAN and
-   that the lab ranges do not overlap the host's.
-10. Managed files: each scenario records a checksum manifest of every declared
-    managed configuration file, including image-supplied and installer-generated
-    files, against its expected post-install state. It asserts the manifest is
-    unchanged after a second boot, and fails when a negative test hand-edits one
-    managed file.
+9. Isolation: a test asserts every rendered network is `isolated`, has no DHCP
+   and no libvirt DNS, that lab ranges do not overlap the host's uplink, and
+   that a deliberately leaking fixture fails the same check. It runs on rendered
+   definitions before boot.
+10. Managed files: the expected checksum manifest is produced on the lab side
+    from the exact bytes the seed carries, at
+    `run/<scenario>/render/<node>.managed-files.sha256`. For the `dns` role it
+    covers `/etc/named.conf` and `/etc/unbound/unbound.conf` on every node, and
+    `/var/named/lab.internal.zone` on a primary only. The secondary's transferred
+    zone, either node's journal files and the cloud-init cache are excluded,
+    because they are runtime state. The gate compares the manifest after
+    readiness and after a second boot, and requires that hand-editing one
+    managed file on the primary fails the same comparison.
 11. Deployment: the guest holds exactly one record for the current deployment id
     under `/var/lib/ultus-corp/deployments/`, with the expected image digest and
     role. It is unchanged after a second boot, and the finalize unit does not
@@ -812,7 +870,10 @@ docs/                           design, plans, runbooks
     units and passes the workload smoke set. Then the previous release boots,
     switches to the candidate, and passes the same checks with its managed files
     compared against the candidate's expected manifest. On a role's first release
-    the previous-release leg is recorded as not applicable.
+    the previous-release leg is recorded as not applicable. The same gate pushes
+    an unsigned image and asserts the host policy refuses it.
+16. Role record: every role image has a `docs/roles/<role>.md` with all four
+    fields, and the proving command in it exits zero in the role image.
 
 ## Secrets and trust
 
@@ -834,7 +895,7 @@ The builder check raised ten questions. All now have a call.
 | --- | --- |
 | Build connectivity | The build host and CI have internet; the lab guests do not. CI is GitHub Actions with keyless OIDC, as in `dux-atomic`. |
 | Image signing and SBOM | GitHub Actions keyless OIDC, one signature and one SBOM per role image. |
-| Artifact distribution | Images to GHCR by digest. The DC runs a pull-through mirror; the host builds a qcow2 with `bootc-image-builder`; no registry runs inside a branch. |
+| Artifact distribution | Images to GHCR by digest. The DC runs a pull-through mirror; the host builds a qcow2 with `image-builder`; no registry runs inside a branch. |
 | Runtime egress | Deny by default. The DC hub is the only egress, and `lab egress on` enables it for updates. |
 | Root CA storage | Encrypted with age in `lab-secrets/`, excluded from git, with the passphrase kept offline. Root generation is a one-time operator script. CI generates a throwaway root per run. |
 | Bootstrap automation | Everything except the operator's root CA, the FreeIPA admin password and the Windows image are automated. All three are runbook steps. |
@@ -859,7 +920,7 @@ bug.
 | FreeRADIUS | `freeradius 3.2.8-2.el10`, AppStream | Stream 10 package index |
 | hostapd | `hostapd 2.11-2.el10`, AppStream, with a documented wired authenticator procedure | RHEL 10 configuring and managing networking, ch. 20 |
 | 802.1X recipe | Red Hat documents hostapd plus FreeRADIUS with EAP-TTLS and LDAP inner auth. EAP-TLS works but is not the vendor default | same chapter |
-| Image to disk | `bootc-image-builder` emits qcow2. Config lives under `/usr/lib/image-builder/bootc`, and the older path is legacy | osbuild docs, RHEL 10 image mode ch. 6 |
+| Image to disk | `image-builder` emits qcow2. Config lives under `/usr/lib/image-builder/bootc`, and the older path is legacy | osbuild docs, RHEL 10 image mode ch. 6 |
 
 Two consequences, both already reflected in the plan:
 
@@ -883,7 +944,7 @@ the signature-policy flags remain to confirm (§Left to the builder).
 
 | Risk | Effect | Mitigation |
 | --- | --- | --- |
-| The hub is a single point | Every branch loses the DC at once | Branch-local DNS, DHCP and NTP keep the LAN alive; stage 3 adds a second hub |
+| The hub is a single point | Every branch loses the DC at once | Branch-local DNS, DHCP and NTP keep the LAN alive; stage 3 makes the DR hub live |
 | Static `AllowedIPs` drift | A new branch needs a hub edit and nothing warns when it is missed | The add-a-branch test; BGP is stage 1 |
 | Branch-to-branch hairpin | Latency and DC bandwidth | Direct paths are stage 2, and most branch traffic is DC-bound anyway |
 | An assembly run needs a stopped desktop | The desktop is unavailable for a scheduled block | Any single scenario runs inside normal work. Schedule assembly, or record it on the EliteDesk |
