@@ -36,7 +36,6 @@ disk_gib = 8
 
   [[node.interface]]
   segment = "lan"
-  address = "10.200.10.100"
   mode = "dhcp"
 
   [[node.interface]]
