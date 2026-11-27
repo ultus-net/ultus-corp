@@ -48,20 +48,36 @@ manifest() {
   fi
 }
 
+# The digest alone cannot prove the core is current: a changed base pin, common
+# manifest or base module leaves the old image id in place. So the cache key is
+# a hash of every input Containerfile.core consumes.
+core_inputs() {
+  {
+    cat Containerfile.core manifests/base.txt build/out/packages-core.txt
+    if [ -f manifests/packages-core.lock ]; then
+      cat manifests/packages-core.lock
+    fi
+    find modules/base -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+  } | sha256sum | cut -d' ' -f1
+}
+
 build_core() {
-  local ref id
+  local ref id inputs
+  manifest core
+  inputs=$(core_inputs)
   ref=$(core_ref)
   if [ -n "$ref" ] && podman image exists "$(core_image)" \
-    && [ "sha256:$(podman image inspect --format '{{.Id}}' "$(core_image)")" = "${ref##*@}" ]; then
+    && [ "sha256:$(podman image inspect --format '{{.Id}}' "$(core_image)")" = "${ref##*@}" ] \
+    && [ "$(cat manifests/core.inputs 2>/dev/null)" = "$inputs" ]; then
     return 0
   fi
-  manifest core
   podman pull -q "$(base_ref)" || return 1
   podman build --build-arg BASE="$(base_ref)" -f Containerfile.core \
     -t "$(core_image)" . || return 1
   podman run --rm "$(core_image)" bootc container lint || return 1
   id=$(podman image inspect --format '{{.Id}}' "$(core_image)")
   printf '%s@%s\n' "$(core_image)" "$id" > manifests/core.txt
+  printf '%s\n' "$inputs" > manifests/core.inputs
 }
 
 build_role() {

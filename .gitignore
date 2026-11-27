@@ -3,8 +3,10 @@ run/
 run/evidence/
 build/vm/
 build/out/
-# The core reference carries the digest of the last local core build.
+# The core reference carries the digest of the last local core build, and the
+# hash of the inputs it was built from.
 manifests/core.txt
+manifests/core.inputs
 
 # Secrets never enter the tree.
 lab-secrets/

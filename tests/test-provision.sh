@@ -36,11 +36,14 @@ mkdir -p run/fixtures/dns-b/var/named
 cp run/fixtures/dns-a/var/named/lab.internal.zone \
   run/fixtures/dns-b/var/named/lab.internal.zone
 
+# $3 runs after the seed is copied and before the applier, so a test can model a
+# deployment that delivered something wrong.
 provision() {
-  local node=$1 check=$2
+  local node=$1 check=$2 setup=${3:-true}
   podman run --rm -v "$PWD/run/fixtures/$node:/seed:ro" "$img" bash -c "
     set -euo pipefail
     cp -a /seed/. /
+    $setup
     /usr/libexec/ultus-corp/provision.sh
     $check
   "
@@ -70,6 +73,28 @@ assert_ok "rendered resolver starts and binds loopback" podman run --rm \
     ss -lun | grep -q "127.0.0.1:53" || { echo "no listener on 127.0.0.1:53"; exit 1; }
     kill "$pid"
   '
+
+# The applier installs the delivered bytes unchanged. A rewrite here would make
+# the guest disagree with the manifest the deployment gate compares against.
+assert_ok "applied bytes match the delivered bytes" podman run --rm \
+  -v "$PWD/run/fixtures/dns-a:/seed:ro" "$img" bash -c '
+    set -euo pipefail
+    cp -a /seed/. /
+    before=$(sha256sum /etc/named.conf /etc/unbound/unbound.conf /var/named/lab.internal.zone)
+    /usr/libexec/ultus-corp/provision.sh
+    after=$(sha256sum /etc/named.conf /etc/unbound/unbound.conf /var/named/lab.internal.zone)
+    [ "$before" = "$after" ] || { echo "the applier rewrote a managed file"; exit 1; }
+  '
+
+# A primary that received no zone still passes a syntax check, so without this
+# case the applier could start an empty name space and the gate would not know.
+assert_fails "primary with no zone fails closed" provision dns-a true \
+  "python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=True)' /var/named/lab.internal.zone"
+
+# The applier validates the delivered file, so a bad deployment fails there and
+# not thirty seconds later in the health check.
+assert_fails "invalid delivered config fails closed" provision dns-a true \
+  "printf '\nthis is not bind syntax\n' >> /etc/named.conf"
 
 assert_ok "secondary copies from the primary" provision dns-b \
   'grep -q "masters { 10.100.10.11; }" /etc/named.conf'

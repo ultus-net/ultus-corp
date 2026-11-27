@@ -7,6 +7,10 @@ role=${1:?usage: test-image.sh <role>}
 
 assert_ok "image builds and lints" build_role "$role"
 assert_ok "core image exists" podman image exists "$(core_image)"
+# A changed base pin or common manifest must rebuild the core, so the recorded
+# input hash is compared rather than trusted.
+assert_eq "core inputs recorded" "$(. build/common.sh; core_inputs)" \
+  "$(cat manifests/core.inputs)"
 assert_ok "base package installed" \
   podman run --rm "$(lab_image "$role")" rpm -q podman
 assert_ok "greenboot installed" \

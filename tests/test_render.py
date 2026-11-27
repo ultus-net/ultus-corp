@@ -303,6 +303,28 @@ class TestDnsRendering(unittest.TestCase):
         self.assertEqual(zone["owner"], "root:named")
         self.assertEqual(zone["permissions"], "0640")
 
+    def test_seed_identity_matches_the_applier_contract(self):
+        # provision.sh reads one field from this file, so the seed must carry
+        # the same identity the renderer exposes, not a second derivation.
+        spec, dns_a = self.primary()
+        user = json.loads(seed_files(dns_a, spec)["user-data"].split("\n", 1)[1])
+        identity = next(
+            i for i in user["write_files"] if i["path"] == "/run/ultus-corp/node.json"
+        )
+        self.assertEqual(json.loads(identity["content"]), node_identity(dns_a, spec))
+        self.assertTrue(json.loads(identity["content"])["primary"])
+
+    def test_secondary_seed_says_it_is_not_primary(self):
+        spec, dns_b = self.secondary()
+        user = json.loads(seed_files(dns_b, spec)["user-data"].split("\n", 1)[1])
+        identity = next(
+            i for i in user["write_files"] if i["path"] == "/run/ultus-corp/node.json"
+        )
+        self.assertFalse(json.loads(identity["content"])["primary"])
+        self.assertNotIn(
+            "/var/named/lab.internal.zone", [i["path"] for i in user["write_files"]]
+        )
+
     def test_identity_marks_a_secondary(self):
         spec, dns_b = self.secondary()
         self.assertFalse(node_identity(dns_b, spec)["primary"])

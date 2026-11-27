@@ -333,13 +333,23 @@ core_digest() {
 }
 
 build_core() {
+  local inputs
   manifest core
+  inputs=$(core_inputs)
+  # A cached image with the right id can still be stale: a moved base pin, an
+  # edited common manifest or a changed base module leaves that id in place. The
+  # recorded input hash is what makes the skip safe.
+  if [ "$(core_ref)" != "" ] && podman image exists "$(core_image)" \
+    && [ "$(cat manifests/core.inputs 2>/dev/null)" = "$inputs" ]; then
+    return 0
+  fi
   podman pull -q "$(base_ref)" || return 1
   podman build --build-arg BASE="$(base_ref)" -f Containerfile.core \
     -t "$(core_image)" . || return 1
   podman run --rm "$(core_image)" bootc container lint || return 1
   printf '%s@sha256:%s\n' "$(core_image)" \
     "$(podman image inspect --format '{{.Id}}' "$(core_image)")" > manifests/core.txt
+  printf '%s\n' "$inputs" > manifests/core.inputs
 }
 
 build_role() {
@@ -363,7 +373,9 @@ cached build too.
 
 `build/package-lock.sh resolve core` writes the core lock from the core image.
 `build/package-lock.sh resolve <role>` writes the role's additions only, which is
-the role's package closure minus the core's. The filter on `rpm -qa` matters:
+the role's package closure minus the core's. It then recomputes the core closure
+plus that delta and fails when the result differs from the role image, so a lock
+that cannot rebuild what was tested never lands. The filter on `rpm -qa` matters:
 it lists `gpg-pubkey` pseudo-packages that `dnf install` cannot resolve.
 
 `modules/` must exist before the first build, or the bind-mount has no source.
@@ -1051,8 +1063,11 @@ the future FreeIPA host on `10.100.10.53`. The record exists before the host
 does, so the delegation is proven independently of the identity work.
 
 `tests/test-provision.sh` runs `provision.sh` inside the image against the
-renderer's own payload for both nodes, so the stanza, the deletion and the
-forwarder are proven without a hypervisor.
+renderer's own payload for both nodes. It compares the hashes of the delivered
+files before and after the apply, so a copy that quietly rewrites a managed file
+fails here instead of at the managed-file gate. It also proves two refusals: a
+primary whose deployment delivered no zone, and a delivered `named.conf` that
+does not parse. Neither needs a hypervisor.
 
 - [ ] **Step 4: Run test to verify it passes**
 

@@ -76,12 +76,18 @@ check_core_ref() {
 }
 
 # Containerfile.core names the base as an argument, so the pin is enforced
-# where the argument is supplied.
+# where the argument is supplied. Checking only the flag would leave the value
+# unproven, so the same file must also define base_ref as the pinned base file.
+# That closes the chain without a second copy of the digest.
 check_core_build_arg() {
     local file="$1"
     [ -r "$file" ] || { echo "File not readable: $file"; return 1; }
     if ! grep -qF -- '--build-arg BASE="$(base_ref)"' "$file"; then
         echo "No --build-arg BASE=\"\$(base_ref)\" in $file"
+        return 1
+    fi
+    if ! grep -qE '^base_ref\(\) *\{ *head -n 1 manifests/base\.txt;? *\}' "$file"; then
+        echo "base_ref in $file does not read manifests/base.txt"
         return 1
     fi
     return 0
