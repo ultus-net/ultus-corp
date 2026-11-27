@@ -161,9 +161,13 @@ Rules that make the model hold:
 
 | Assembly run | VMs | RAM | Proves |
 | --- | --- | --- | --- |
-| assembly-min | 9 | 12 GiB | hub, branch 1, identity and one client, at the same time |
-| assembly-branches | 13 | 16 GiB | add-a-branch and branch survival, across two branches |
-| full | 26 | 30 GiB | the whole diagram, documented and never run on this host |
+| assembly-min | 8 | 12 GiB | hub, branch 1, identity and one client, at the same time |
+| assembly-branches | 11 | 16 GiB | add-a-branch and branch survival, across two branches |
+| full | 23 | 30 GiB | the whole diagram, documented and never run on this host |
+
+Each branch is one edge VM that also serves its local DNS, DHCP, NTP and proxy.
+The counts reflect that. RAM is re-measured when s3 lands, because the edge now
+carries the service memory.
 
 Peak for any single scenario is 10 GiB. The host has about 18 GiB free with the
 desktop running, so every scenario fits as normal work. Both assembly runs need
@@ -243,6 +247,7 @@ library, so the renderer needs no dependency at all.
 | D19 | Integration evidence | A static interface-composition check plus a dated assembly run | Composition is checked continuously where it can be, and sampled where it cannot | Assuming a green scenario proves the network |
 | D20 | Rollback contract | The class belongs to each data store, not the role. Stateless roles redeploy the previous image; config-only roles redeploy the previous image and seed; durable stores are quiesced, backed up with the application's tool and restored into a matching image; rebuildable stores are wiped and re-created from the repository, a peer or upstream, with the accepted loss declared. A role can hold both, and `app` does. Gate 12 exercises one store per class, and gate 14 tests the declared loss | `/var` persists across deployments, and database schemas are not reliably reversible. Not all `/var` data is authoritative: DHCP leases, registry and proxy caches, monitoring history and deployment artifacts are rebuildable. Treating them as durable adds a backup burden that protects nothing | Treating `bootc rollback` as a data rollback; one generic snapshot rule for every role; backing up data that is cheaper to recreate |
 | D21 | Update plane | Quadlet containers are declared as bootc logically bound images under `/usr/lib/bootc/bound-images.d`, pinned by digest, preloaded by the disk build, and read through `GlobalArgs=--storage-opt=additionalimagestore=/usr/lib/bootc/storage`. No unit sets `AutoUpdate=registry`, and the auto-update timer is masked. Changing an application means building a new host image | A floating container in `/var/lib/containers` is outside the image digest, rollback, offline boot and SBOM. Without the storage argument the unit still uses floating storage; without preloading, a cold boot with no egress has no image | Independent container auto-update; digest pinning that still allows in-place application updates |
+| D22 | Branch footprint | One edge VM per branch. The branch profile runs the overlay plus a local BIND secondary, Unbound, Kea, chrony and a Caddy cache. Authority stays central; details reach the branch by zone transfer or at deploy | A branch needs local answers when the tunnel drops, and a second services VM buys nothing. Centralising the serving path would turn a WAN cut into an outage | A second services VM per branch; relaying DHCP and DNS to the hub |
 
 ## Configuration and deployment inputs
 
@@ -319,7 +324,8 @@ can hold a durable store and a rebuildable one.
 | Role | Class | Store, and how it comes back |
 | --- | --- | --- |
 | ntp, proxy | stateless | none |
-| edge, radius | config-only | none; every input is in the seed |
+| edge (hub), radius | config-only | none; every input is in the seed |
+| edge (branch) | rebuildable | BIND secondary zone, Kea leases and the proxy cache; re-transfer, re-learn, re-fill |
 | dns | rebuildable | the zone is rendered from `lab.toml`, where static records live; Kea and FreeIPA re-register dynamic records |
 | dhcp | rebuildable | the lease store; clients re-DISCOVER |
 | app | both | Keycloak realms rebuild from the repo; Gitea repositories are durable |
@@ -354,6 +360,7 @@ Gate 14 runs the probe; a store with no probe fails the gate.
 | Store | Probe | Expected after rebuild |
 | --- | --- | --- |
 | dns | `dig` a static and a dynamic record | static answers from the seed; dynamic records re-register |
+| edge (branch) | `dig` a zone record, lease a client, fetch a cached object | the zone re-transfers; a new lease; the cache re-fills |
 | dhcp | a client acquires a lease | a new lease; old leases absent |
 | app / Keycloak | OIDC login to a realm declared in the repo | login succeeds; ad-hoc realms absent |
 | registry | pull a pinned image through the mirror | pull succeeds; the cache refills |
@@ -383,17 +390,14 @@ flowchart TB
     AUX["git, secrets<br/>Fleet, PXE"]
   end
   subgraph b1["Branch 1, 10.11.0.0/16"]
-    E1[edge-1]
-    L1["DNS, DHCP, NTP, proxy"]
+    E1["edge-1<br/>overlay + local DNS, DHCP, NTP, proxy"]
     C1["Linux + Windows clients"]
   end
   subgraph b2["Branch 2, 10.12.0.0/16"]
-    E2[edge-2]
-    L2["DNS, DHCP, NTP, proxy"]
+    E2["edge-2<br/>overlay + local DNS, DHCP, NTP, proxy"]
   end
   subgraph b3["Branch 3, 10.13.0.0/16"]
-    E3[edge-3]
-    L3["DNS, DHCP, NTP, proxy"]
+    E3["edge-3<br/>overlay + local DNS, DHCP, NTP, proxy"]
   end
   E1 == overlay ==> HUB
   E2 == overlay ==> HUB
@@ -429,13 +433,30 @@ flowchart TB
 | step-ca | yes | no | one service root |
 | Fleet, PXE | yes | relay only | one onboarding plane |
 | Authoritative DNS | primary | no | central source of truth |
-| Recursive DNS | yes | yes | resolution survives a WAN cut |
-| DHCP | no | yes | leases survive a WAN cut |
-| NTP | yes | yes | local clock |
-| Proxy cache | yes | yes | local TLS termination |
+| Recursive DNS | yes | edge | resolution survives a WAN cut; zones transfer from the hub |
+| DHCP | no | edge | leases survive a WAN cut; scopes render per branch |
+| NTP | yes | edge | local clock; the hub is the upstream |
+| Proxy cache | yes | edge | local TLS termination; config renders per branch |
 | Registry mirror | yes | pull only | the hub is the only egress |
 | Monitoring, git, secrets | yes | agent only | central |
 | Print, file, IPAM | yes | no | central, and stateful |
+
+"Branch" means the edge VM. It is the only branch server: the overlay, the
+firewall and the local services share one bootc image and one deployment.
+
+### How details reach a branch
+
+| Detail | Source of truth | Path to the branch |
+| --- | --- | --- |
+| `lab.internal` zones | hub BIND primary | AXFR/IXFR to the branch secondary over the overlay |
+| DHCP scopes and reservations | `lab.toml` | rendered into the branch seed at deploy |
+| Proxy cache policy | `lab.toml` | rendered into the branch seed at deploy |
+| Time | hub chrony | upstream over the overlay |
+| Identity | FreeIPA in the DC | forwarded while the tunnel is up; identity does not survive a cut |
+
+Nothing pushes host configuration at runtime. A reservation change is a branch
+redeploy with a new seed. DNS is the exception because zone transfer is the
+protocol's own replication, not a configuration channel.
 
 ## Endpoint coverage
 
@@ -456,9 +477,9 @@ out of scope, so no configuration profile is generated or validated.
 
 | Debuts in | Role | Image | Stateful? |
 | --- | --- | --- | --- |
-| s0 | dns | BIND 9, Unbound | zone data at the primary; the secondary re-transfers |
+| s0 | dns | BIND 9 primary, Unbound at the DC | zone data at the primary |
 | s2 | dhcp | Kea, lease store | yes |
-| s3 | edge | FRR, nftables, WireGuard, DHCP relay, `hostapd`; `branch` and `hub` profiles | config only |
+| s3 | edge | FRR, nftables, WireGuard, DHCP relay, `hostapd`; `branch` profile adds a BIND secondary, Unbound, Kea, chrony and a Caddy cache; `hub` profile adds the hub BGP | config only at the hub; rebuildable at the branch |
 | s3 | ntp | chrony | no |
 | s4 | pki | step-ca | yes, small |
 | s4 | proxy | Caddy, certmonger client | no |
@@ -491,7 +512,7 @@ enablement.
 | s0-base | Repo skeleton, CI, one `dns` role, one VM | A lookup answers, then `lab down s0-base` leaves no domain, network or volume |
 | s1-dns | Authoritative plus recursive, delegation to the FreeIPA stub | A client resolves `dns-br1.lab.internal` and `ipa.lab.internal` through the pair |
 | s2-dhcp | Edge relay plus local Kea with a lease store | A client leases across the relay, and the lease survives a Kea restart |
-| s3-overlay | Hub and one branch edge, WireGuard, nftables policy, hub-and-spoke routes | Branch 1 reaches DC subnets and cannot reach branch 2; a key rotation needs no image change |
+| s3-overlay | Hub and one branch edge, WireGuard, nftables policy, hub-and-spoke routes, and the branch services | Branch 1 reaches DC subnets and cannot reach branch 2; with the uplink down, the edge still answers DNS, leases a client, serves time and serves a cached object |
 | s4-pki | Offline root, step-ca intermediate, ACME issuance | A guest receives a leaf from step-ca and trusts it without a manual copy |
 | s5-identity | FreeIPA, Keycloak federation, one OIDC app | A FreeIPA user logs in to Gitea over OIDC, and no local account exists |
 | s6-radius | FreeRADIUS, `hostapd` wired authenticator, a Linux supplicant | `eapol_test` passes, then a real supplicant completes EAP-TLS |

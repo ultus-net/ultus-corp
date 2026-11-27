@@ -278,6 +278,8 @@ The spec commit accepts the findings into the draft:
 - D20: a per-store rollback contract, with a store-level class table.
 - D21: Quadlets as bootc logically bound images, pinned by digest, read through
   the additional image store, and preloaded so a cold boot with egress off works.
+- D22: one edge VM per branch. The edge is the branch router and the branch
+  serving point, with a BIND secondary, Kea, chrony and a Caddy cache.
 - `§Configuration and deployment inputs`: the four-layer model, the seed
   contract, the secrecy lifecycle, the deployment record, and when deployment
   ends.
@@ -290,6 +292,12 @@ The spec commit accepts the findings into the draft:
 
 No runtime dependency is added and no tool is adopted. The only optional
 addition remains Ansible behind the trigger in section 4.
+
+After the review, the design owner set the branch footprint. The edge is the
+branch router and the only branch server. It runs the overlay plus a BIND
+secondary, Unbound, Kea, chrony and a Caddy cache. Authority stays central:
+zones transfer over the tunnel, and scopes and proxy policy render per branch at
+deploy. A reservation change is still a redeploy, not a runtime push.
 
 ## 6. Plan impact
 
@@ -304,6 +312,7 @@ aspirational:
 | Task 6, `s0-base` | Ship `ultus-deploy-finalize@.service` and `ultus-deploy-ready.target`; gate 11 reads the id-keyed records under `/var/lib/ultus-corp/deployments/` |
 | Task 7, `s1-dns` | Render `also-notify` and `allow-transfer` at deploy; move `lab.internal.zone` out of `/var` |
 | Task 8, CI | Wire gates 10 to 14, including the negative hand-edit test, the lock check and the rebuild scenario |
+| First branch plan, s3 | Add the branch profile: BIND secondary, Kea, chrony and Caddy; prove the uplink-down case |
 | First Quadlet role, s5 `app` | Preload the bound images and add the cold boot with egress off |
 
 P0 proves s0, which builds the DNS store from the seed on a fresh host. That is a
