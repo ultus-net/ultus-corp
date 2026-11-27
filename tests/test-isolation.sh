@@ -78,7 +78,7 @@ PY
 # pass while the repository publishes something it should not.
 assert_ok "real core pin" check_base_pin manifests/base.txt Containerfile.core
 assert_ok "real role pins" \
-  check_role_froms_core Containerfile.dns Containerfile.dhcp
+  check_role_froms_core Containerfile.dns Containerfile.dhcp Containerfile.client
 assert_ok "real manifests" \
   check_manifest_one_per_line manifests/packages-common.txt \
   manifests/packages-dns.txt manifests/packages-dhcp.txt

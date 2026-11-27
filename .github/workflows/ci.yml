@@ -56,6 +56,8 @@ jobs:
             tests: bash tests/test-packages.sh && bash tests/test-provision.sh
           - role: dhcp
             tests: bash tests/test-dhcp.sh
+          - role: client
+            tests: bash tests/test-client.sh
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -111,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        role: [dns, dhcp]
+        role: [dns, dhcp, client]
     steps:
       - uses: actions/checkout@v7
       - uses: sigstore/cosign-installer@v3
