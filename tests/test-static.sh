@@ -21,7 +21,7 @@ assert_fails "core build on the wrong pin rejected" \
 # The core cache key must cover every input the Containerfile copies, or an
 # edited base module would ship inside an image that was never rebuilt.
 core_key_changes_with_modules() {
-  local tmp before after
+  local tmp before after empty
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/ultus-core-key.XXXXXX")
   mkdir -p "$tmp/manifests" "$tmp/build/out" "$tmp/modules/base"
   cp Containerfile.core "$tmp/"
@@ -32,10 +32,28 @@ core_key_changes_with_modules() {
   before=$(cd "$tmp" && bash -c '. ./key.sh; core_inputs')
   printf 'y\n' > "$tmp/modules/base/00-base.sh"
   after=$(cd "$tmp" && bash -c '. ./key.sh; core_inputs')
+  # A core built before the first module exists must still key.
+  mkdir -p "$tmp/empty"
+  cp "$tmp/key.sh" "$tmp/empty/"
+  mkdir -p "$tmp/empty/manifests" "$tmp/empty/build/out"
+  cp "$tmp/manifests/base.txt" "$tmp/empty/manifests/"
+  cp "$tmp/build/out/packages-core.txt" "$tmp/empty/build/out/"
+  cp Containerfile.core "$tmp/empty/"
+  empty=$(cd "$tmp/empty" && bash -c '. ./key.sh; core_inputs')
   python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' "$tmp"
-  [ -n "$before" ] && [ "$before" != "$after" ]
+  [ -n "$before" ] && [ "$before" != "$after" ] && [ -n "$empty" ]
 }
 assert_ok "core cache key covers the base modules" core_key_changes_with_modules
+
+# The lock delta is a set difference, so an unsorted role list still produces a
+# sorted, complete lock. This is the case that a line merge gets wrong.
+assert_eq "role lock delta is a set difference" \
+  "$(printf 'bind-9.18.0-1.el10.x86_64\nunbound-utils-1.20.0-1.el10.x86_64')" \
+  "$(lock_delta tests/fixtures/rpm-core.txt tests/fixtures/rpm-role.txt)"
+assert_ok "role lock describes the image" \
+  lock_covers tests/fixtures/rpm-core.txt tests/fixtures/rpm-role-lock.txt tests/fixtures/rpm-role.txt
+assert_fails "short role lock rejected" \
+  lock_covers tests/fixtures/rpm-core.txt tests/fixtures/rpm-role-lock-short.txt tests/fixtures/rpm-role.txt
 assert_ok    "one package per line accepted"      check_manifest_one_per_line tests/fixtures/packages-ok.txt
 assert_fails "two packages on one line rejected"  check_manifest_one_per_line tests/fixtures/packages-multi.txt
 assert_fails "key material in tree rejected"      check_no_secret_patterns tests/fixtures

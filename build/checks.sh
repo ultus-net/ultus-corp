@@ -93,6 +93,24 @@ check_core_build_arg() {
     return 0
 }
 
+# The role lock is a set difference, not a line-order merge, so the result does
+# not depend on how either list is ordered or on the ambient collation.
+lock_delta() {
+    local core="$1" role="$2"
+    { grep -Fxv -f "$core" "$role" || true; } | LC_ALL=C sort -u
+}
+
+# A lock describes a role image only when the core closure plus the delta is
+# exactly the image's package list. Anything else cannot rebuild what was tested.
+lock_covers() {
+    local core="$1" lock="$2" role="$3"
+    if ! diff -q <( { cat "$core" "$lock"; } | LC_ALL=C sort -u ) \
+            <( LC_ALL=C sort -u "$role" ) > /dev/null; then
+        echo "core closure plus lock is not the role image's package set"
+        return 1
+    fi
+}
+
 check_manifest_one_per_line() {
     local status=0 file line_num line trimmed
     for file in "$@"; do

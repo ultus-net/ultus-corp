@@ -57,7 +57,10 @@ core_inputs() {
     if [ -f manifests/packages-core.lock ]; then
       cat manifests/packages-core.lock
     fi
-    find modules/base -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    # A core built before the first module exists is still a valid core.
+    if [ -d modules/base ]; then
+      find modules/base -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum
+    fi
   } | sha256sum | cut -d' ' -f1
 }
 

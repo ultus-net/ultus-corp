@@ -1,3 +1,8 @@
+NetworkManager-1:1.58.0-1.el10.x86_64
+NetworkManager-cloud-setup-1:1.58.0-1.el10.x86_64
+NetworkManager-libnm-1:1.58.0-1.el10.x86_64
+NetworkManager-tui-1:1.58.0-1.el10.x86_64
+WALinuxAgent-udev-2.14.0.1-3.el10.noarch
 aardvark-dns-4:2.1.0-1.el10.x86_64
 acl-2.4.0-2.el10.x86_64
 adcli-0.9.3.1-3.el10.x86_64
@@ -23,8 +28,8 @@ brcmfmac-firmware-20260812-27.el10.noarch
 bubblewrap-0.10.0-3.el10.x86_64
 bzip2-1.0.8-25.el10.x86_64
 bzip2-libs-1.0.8-25.el10.x86_64
-ca-certificates-2026.2.92_v9.0.319-100.3.el10.noarch
 c-ares-1.34.9-1.el10.x86_64
+ca-certificates-2026.2.92_v9.0.319-100.3.el10.noarch
 catatonit-5:0.2.1-4.el10.x86_64
 centos-gpg-keys-10.0-23.el10.noarch
 centos-stream-release-10.0-23.el10.noarch
@@ -45,9 +50,9 @@ conmon-3:2.2.1-4.el10.x86_64
 console-login-helper-messages-0.21.3-10.el10.noarch
 console-login-helper-messages-issuegen-0.21.3-10.el10.noarch
 console-login-helper-messages-profile-0.21.3-10.el10.noarch
+container-selinux-4:2.250.0-1.el10.noarch
 containers-common-6:6.0-3.el10.noarch
 containers-common-extra-6:6.0-3.el10.noarch
-container-selinux-4:2.250.0-1.el10.noarch
 coreutils-9.5-14.el10.x86_64
 coreutils-common-9.5-14.el10.x86_64
 cpio-2.15-3.el10.x86_64
@@ -85,8 +90,8 @@ dracut-squash-107-11.el10.x86_64
 duktape-2.7.0-10.el10.x86_64
 e2fsprogs-1.47.1-5.el10.x86_64
 e2fsprogs-libs-1.47.1-5.el10.x86_64
-efibootmgr-18-9.el10.x86_64
 efi-filesystem-6-8.el10.noarch
+efibootmgr-18-9.el10.x86_64
 efivar-libs-39-3.el10.x86_64
 elfutils-debuginfod-client-0.197-1.el10.x86_64
 elfutils-default-yama-scope-0.197-1.el10.noarch
@@ -102,10 +107,10 @@ filesystem-3.18-17.el10.x86_64
 findutils-1:4.10.0-5.el10.x86_64
 flatpak-session-helper-1.18.0-2.el10.x86_64
 fstrm-0.6.1-12.el10.x86_64
-fuse3-3.16.2-5.el10.x86_64
-fuse3-libs-3.16.2-5.el10.x86_64
 fuse-common-3.16.2-5.el10.x86_64
 fuse-libs-2.9.9-25.el10.x86_64
+fuse3-3.16.2-5.el10.x86_64
+fuse3-libs-3.16.2-5.el10.x86_64
 fwupd-2.1.6-1.el10.x86_64
 fwupd-efi-1.8-1.el10.x86_64
 gawk-5.3.0-7.el10.x86_64
@@ -312,12 +317,8 @@ nano-8.1-3.el10.x86_64
 ncurses-6.4-15.20240127.el10.x86_64
 ncurses-base-6.4-15.20240127.el10.noarch
 ncurses-libs-6.4-15.20240127.el10.x86_64
-netavark-4:2.1.0-1.el10.x86_64
 net-tools-2.0-0.73.20160912git.el10.x86_64
-NetworkManager-1:1.58.0-1.el10.x86_64
-NetworkManager-cloud-setup-1:1.58.0-1.el10.x86_64
-NetworkManager-libnm-1:1.58.0-1.el10.x86_64
-NetworkManager-tui-1:1.58.0-1.el10.x86_64
+netavark-4:2.1.0-1.el10.x86_64
 newt-0.52.24-5.el10.x86_64
 nfs-utils-1:2.8.3-10.el10.x86_64
 nftables-1:1.1.7-1.el10.x86_64
@@ -371,6 +372,7 @@ procps-ng-4.0.4-13.el10.x86_64
 protobuf-c-1.5.0-6.el10.x86_64
 psmisc-23.6-8.el10.x86_64
 publicsuffix-list-dafsa-20240107-5.el10.noarch
+python-unversioned-command-3.12.16-2.el10.noarch
 python3-3.12.16-2.el10.x86_64
 python3-audit-4.2.1-3.el10.x86_64
 python3-charset-normalizer-3.4.2-1.el10.noarch
@@ -415,7 +417,6 @@ python3-six-1.16.0-16.el10.noarch
 python3-subscription-manager-rhsm-1.30.16-1.el10.x86_64
 python3-systemd-235-11.el10.x86_64
 python3-urllib3-1.26.19-4.el10.noarch
-python-unversioned-command-3.12.16-2.el10.noarch
 qemu-guest-agent-18:11.1.0-4.el10.x86_64
 quota-1:4.09-10.el10.x86_64
 quota-nls-1:4.09-10.el10.noarch
@@ -487,7 +488,6 @@ vim-data-2:9.1.083-26.el10.noarch
 vim-minimal-2:9.1.083-26.el10.x86_64
 virt-what-1.27-3.el10.x86_64
 volume_key-libs-0.3.12-27.el10.x86_64
-WALinuxAgent-udev-2.14.0.1-3.el10.noarch
 which-2.21-44.el10.x86_64
 xfsprogs-6.16.0-2.el10.x86_64
 xkeyboard-config-2.41-3.el10.noarch

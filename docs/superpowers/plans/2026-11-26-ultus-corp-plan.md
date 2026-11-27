@@ -373,10 +373,12 @@ cached build too.
 
 `build/package-lock.sh resolve core` writes the core lock from the core image.
 `build/package-lock.sh resolve <role>` writes the role's additions only, which is
-the role's package closure minus the core's. It then recomputes the core closure
-plus that delta and fails when the result differs from the role image, so a lock
-that cannot rebuild what was tested never lands. The filter on `rpm -qa` matters:
-it lists `gpg-pubkey` pseudo-packages that `dnf install` cannot resolve.
+the role's package closure minus the core's. The delta is a set difference, not a
+line-order merge, so neither the input order nor the ambient locale can change it.
+The script then recomputes the core closure plus that delta and fails when the
+result differs from the role image, so a lock that cannot rebuild what was tested
+never lands. The filter on `rpm -qa` matters: it lists `gpg-pubkey`
+pseudo-packages that `dnf install` cannot resolve.
 
 `modules/` must exist before the first build, or the bind-mount has no source.
 Task 2 therefore creates

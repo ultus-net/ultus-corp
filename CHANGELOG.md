@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - feat: `s1-dns` pairs a primary with a secondary that copies the zone, delegates `ipa.lab.internal`, and keeps answering while the primary is suspended ([Task 7](docs/superpowers/plans/2026-11-26-ultus-corp-plan.md)); the spec's `secondary` names a node, and the renderer resolves it to an address for `masters`
 - feat: `tests/test-provision.sh` proves both role stanzas inside the image, and the packages gate now starts `unbound` and checks it binds `127.0.0.1:53`
 - fix: the core build is keyed on the hash of every input it consumes, so a moved base pin, an edited common manifest or a changed `modules/base/` file rebuilds it instead of reusing a stale image
-- fix: a role package lock now fails closed unless the core closure plus the recorded delta reproduces the built image, and the static gate proves the base pin reaches `Containerfile.core` through `base_ref`
+- fix: a role package lock now fails closed unless the core closure plus the recorded delta reproduces the built image; the delta is a set difference, so ordering and locale cannot change it, and the static gate proves the base pin reaches `Containerfile.core` through `base_ref`
 - fix: the disk build states the rootful podman contract through `LAB_PODMAN` and caches the qcow2 per image id; `lab doctor` names both gaps
 - fix: the guest boots: libvirt has no `isolated` forward mode, `qemu64` lacks SSE4.2, the daemon needs absolute disk paths, and cloud-init 24.4 rejects `to: default` in network-config v2
 - fix: the node derives its zone from the seed: the owner-name rewrite now matches the bare `dns-a` token, `unbound.service` is enabled, and the base module enables `greenboot-healthcheck.service`
