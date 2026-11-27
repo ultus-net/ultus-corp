@@ -6,6 +6,7 @@ role=${1:?usage: test-image.sh <role>}
 . build/common.sh
 
 assert_ok "image builds and lints" build_role "$role"
+assert_ok "core image exists" podman image exists "$(core_image)"
 assert_ok "base package installed" \
   podman run --rm "$(lab_image "$role")" rpm -q podman
 assert_ok "greenboot installed" \

@@ -1,0 +1,1 @@
+localhost/ultus-corp/core:local

@@ -3,32 +3,72 @@ set -euo pipefail
 
 base_ref() { head -n 1 manifests/base.txt; }
 
+core_image() { echo "localhost/ultus-corp/core:local"; }
+
 lab_image() { echo "localhost/ultus-corp/$1:local"; }
 
-# Join the common manifest with the role manifest into the install list.
-# A role manifest that does not exist yet contributes nothing, so the first
-# image builds before the role is written.
+# The core reference is written by build_core as <tag>@sha256:<digest>, so a
+# role build names the exact core it was qualified against. The file is a build
+# artifact, not a checked-in pin: the digest changes with every core build.
+core_ref() {
+  [ -f manifests/core.txt ] || return 0
+  head -n 1 manifests/core.txt
+}
+
+# Podman resolves `repo@sha256:<id>` against a registry unless that digest is
+# already a repo digest, and a locally built image has none. The build argument
+# is therefore the bare digest, which resolves in the local store.
+core_digest() {
+  local ref
+  ref=$(core_ref)
+  [ -n "$ref" ] || return 1
+  printf '%s\n' "${ref##*@}"
+}
+
+# The core owns the common manifest. A role manifest carries only its additions,
+# so the role image stays the thin layer on top.
 manifest() {
-  local role=$1 list
+  local role=$1 list=() out="build/out/packages-$1.txt"
   mkdir -p build/out
-  list=(manifests/packages-common.txt)
-  if [ -f "manifests/packages-$role.txt" ]; then
+  if [ "$role" = core ]; then
+    list+=(manifests/packages-common.txt)
+  elif [ -f "manifests/packages-$role.txt" ]; then
     list+=("manifests/packages-$role.txt")
   fi
-  sort -u "${list[@]}" > "build/out/packages-$role.txt"
+  if [ ${#list[@]} -eq 0 ]; then
+    : > "$out"
+  else
+    sort -u "${list[@]}" > "$out"
+  fi
 
-  if [ -f "manifests/packages-$role.lock" ]; then
+  if [ -f "manifests/packages-$role.lock" ] && [ "${LAB_UNLOCKED:-0}" != 1 ]; then
     cp "manifests/packages-$role.lock" "build/out/install-$role.txt"
   else
-    cp "build/out/packages-$role.txt" "build/out/install-$role.txt"
+    cp "$out" "build/out/install-$role.txt"
   fi
+}
+
+build_core() {
+  local ref id
+  ref=$(core_ref)
+  if [ -n "$ref" ] && podman image exists "$(core_image)" \
+    && [ "sha256:$(podman image inspect --format '{{.Id}}' "$(core_image)")" = "${ref##*@}" ]; then
+    return 0
+  fi
+  manifest core
+  podman pull -q "$(base_ref)" || return 1
+  podman build --build-arg BASE="$(base_ref)" -f Containerfile.core \
+    -t "$(core_image)" . || return 1
+  podman run --rm "$(core_image)" bootc container lint || return 1
+  id=$(podman image inspect --format '{{.Id}}' "$(core_image)")
+  printf '%s@%s\n' "$(core_image)" "$id" > manifests/core.txt
 }
 
 build_role() {
   local role=$1
+  build_core || return 1
   manifest "$role"
-  podman pull -q "$(base_ref)" || return 1
-  podman build --build-arg BASE="$(base_ref)" -f "Containerfile.$role" \
+  podman build --build-arg CORE="$(core_digest)" -f "Containerfile.$role" \
     -t "$(lab_image "$role")" . || return 1
   podman run --rm "$(lab_image "$role")" bootc container lint
 }

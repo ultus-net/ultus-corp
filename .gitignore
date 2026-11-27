@@ -3,6 +3,8 @@ run/
 run/evidence/
 build/vm/
 build/out/
+# The core reference carries the digest of the last local core build.
+manifests/core.txt
 
 # Secrets never enter the tree.
 lab-secrets/

@@ -25,7 +25,13 @@ check_base_pin() {
         fi
 
         if [ "$ref" = '${BASE}' ]; then
-            [ -n "$arg_base" ] || { echo "FROM uses \${BASE} with no ARG BASE in $file"; status=1; continue; }
+            # A Dockerfile may declare ARG BASE with no default, because the
+            # build passes the pinned digest. A declared default must match.
+            grep -qE '^ARG[[:space:]]+BASE(=[^[:space:]]*)?$' "$file" \
+                || { echo "FROM uses \${BASE} with no ARG BASE in $file"; status=1; continue; }
+            if [ -z "$arg_base" ]; then
+                continue
+            fi
             ref="$arg_base"
         fi
 
@@ -35,6 +41,50 @@ check_base_pin() {
         fi
     done
     return $status
+}
+
+# A role image must layer on the core, never on the upstream base.
+check_role_froms_core() {
+    local status=0 file ref
+    for file in "$@"; do
+        [ -r "$file" ] || { echo "File not readable: $file"; status=1; continue; }
+        if ! grep -qE '^ARG[[:space:]]+CORE(=[^[:space:]]*)?$' "$file"; then
+            echo "No ARG CORE in $file"
+            status=1
+            continue
+        fi
+        ref=$(sed -n 's/^FROM[[:space:]]*//p' "$file" \
+              | grep -v '^scratch' | awk '{print $1}' | tail -n 1)
+        if [ "$ref" != '${CORE}' ]; then
+            echo "$file does not build FROM \${CORE}: found '$ref'"
+            status=1
+        fi
+    done
+    return $status
+}
+
+# The core reference must name a digest, because a tag can be moved.
+check_core_ref() {
+    local file="$1" ref
+    [ -r "$file" ] || { echo "File not readable: $file"; return 1; }
+    ref=$(head -n 1 "$file" | tr -d '[:space:]')
+    if [[ ! "$ref" =~ @sha256:[0-9a-f]{64}$ ]]; then
+        echo "Core ref is not digest pinned: ${ref:-empty}"
+        return 1
+    fi
+    return 0
+}
+
+# Containerfile.core names the base as an argument, so the pin is enforced
+# where the argument is supplied.
+check_core_build_arg() {
+    local file="$1"
+    [ -r "$file" ] || { echo "File not readable: $file"; return 1; }
+    if ! grep -qF -- '--build-arg BASE="$(base_ref)"' "$file"; then
+        echo "No --build-arg BASE=\"\$(base_ref)\" in $file"
+        return 1
+    fi
+    return 0
 }
 
 check_manifest_one_per_line() {
